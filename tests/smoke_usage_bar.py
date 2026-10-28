@@ -104,12 +104,45 @@ check('window.get_child() is the terminal', window.get_child() is term)
 check('window.get_children()[0] is the terminal', window.get_children()[0] is term)
 check('terminal.get_parent() is the window', term.get_parent() is window)
 check('Factory isinstance Window still holds', maker.isinstance(window, 'Window'))
-check('bar present as wrapper child', bar.label.get_parent() is bar.wrapper)
+check('bar box is a wrapper child', bar.box.get_parent() is bar.wrapper)
 
 expected = expected_markup()
 check('bar text matches format_bar(read_usage())',
       pump(2.0, lambda: bar_text_matches(window, expected)),
       f'{bar.label.get_label()!r} != {expected!r}')
+
+
+def fills_slot(win, b, tol=1):
+    child, slot = win.get_child(), b.slot
+    ca, sa = child.get_allocation(), slot.get_allocation()
+    return (abs(ca.width - sa.width) <= tol and abs(ca.height - sa.height) <= tol
+            and sa.width > 1000)
+
+
+# root child must fill the slot when the window grows (RGBA window: gaps are see-through)
+window.resize(1600, 1000)
+check('resize: root child fills slot', pump(1.0, lambda: fills_slot(window, bar)),
+      f'child={window.get_child().get_allocation().width}x{window.get_child().get_allocation().height}'
+      f' slot={bar.slot.get_allocation().width}x{bar.slot.get_allocation().height}')
+window.fullscreen()
+pump(1.0)
+check('fullscreen: root child fills slot',
+      (lambda c, s: abs(c.width - s.width) <= 1 and abs(c.height - s.height) <= 1)(
+          window.get_child().get_allocation(), bar.slot.get_allocation()))
+window.unfullscreen()
+window.resize(1600, 1000)
+pump(0.5)
+
+# opaque black bar background across the full window width
+bg = bar.box.get_style_context().get_background_color(Gtk.StateFlags.NORMAL)
+check('bar box is visible and labelled', bar.box.get_visible() and bar.label.get_visible()
+      and bar.box.get_style_context().has_class('ai-glance-usage-bar')
+      and bar.label.get_parent() is bar.box)
+check('bar box background is opaque #000000', (bg.red, bg.green, bg.blue, bg.alpha) == (0, 0, 0, 1),
+      str(bg))
+check('bar box spans window width', abs(bar.box.get_allocation().width - bar.wrapper.get_allocation().width) <= 1
+      and bar.box.get_allocation().width >= 1500, str(bar.box.get_allocation().width))
+check('root child fills slot after unfullscreen', fills_slot(window, bar))
 
 # split vert / horiz
 term.emit('split-vert', None)
@@ -122,7 +155,7 @@ pump(0.5)
 terms = window.get_terminals()
 check('split horiz: 3 terminals', len(terms) == 3)
 check('bar still present after splits', Gtk.Bin.get_child(window) is bar.wrapper
-      and bar.label.get_parent() is bar.wrapper)
+      and bar.box.get_parent() is bar.wrapper)
 
 # zoom / unzoom
 old_child = window.get_child()
@@ -130,9 +163,11 @@ window.zoom(term2)
 pump(0.3)
 check('zoomed: child is the zoomed terminal', window.get_child() is term2 and window.is_zoomed())
 check('zoomed: bar present', Gtk.Bin.get_child(window) is bar.wrapper)
+check('zoomed: terminal fills slot', pump(0.5, lambda: fills_slot(window, bar)))
 window.unzoom()
 pump(0.3)
 check('unzoomed: layout restored', window.get_child() is old_child and not window.is_zoomed())
+check('unzoomed: root child fills slot', pump(0.5, lambda: fills_slot(window, bar)))
 check('unzoomed: 3 terminals', len(window.get_terminals()) == 3)
 
 # tabs
@@ -142,7 +177,8 @@ pump(0.5)
 check('tab_new: Notebook is the window child', window.is_child_notebook()
       and maker.isinstance(window.get_child(), 'Notebook'))
 check('tab_new: bar present', Gtk.Bin.get_child(window) is bar.wrapper
-      and bar.label.get_parent() is bar.wrapper)
+      and bar.box.get_parent() is bar.wrapper)
+check('tab_new: notebook fills slot', pump(0.5, lambda: fills_slot(window, bar)))
 check('tab_new: 4 terminals', len(window.get_terminals()) == 4)
 newtab_term = [t for t in window.get_terminals() if t not in known][0]
 newtab_term.close()

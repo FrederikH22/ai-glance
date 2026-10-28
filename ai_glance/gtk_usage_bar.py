@@ -1,7 +1,10 @@
 """Per-window Claude usage bar for Terminator.
 
 Each Terminator ``Window`` gets its real GTK child replaced by a wrapper box
-``[slot, separator, bar]``. The Terminator child (Terminal/Paned/Notebook) lives
+``[slot, separator, bar]`` (the bar is an EventBox with an opaque black
+background; Terminator windows use an RGBA visual, so unpainted areas would be
+see-through). The slot packs its child with expand+fill so it always receives
+the whole allocation. The Terminator child (Terminal/Paned/Notebook) lives
 in ``slot``; patched ``Window.add/remove/get_child`` keep every Terminator
 caller seeing it as the window's only child. ``get_children`` needs no patch:
 the original is ``[self.get_child()]``.
@@ -28,6 +31,14 @@ RERENDER_SECONDS = 60
 _ATTR = '_ai_glance_usage'
 _PATCHED = '_ai_glance_usage_patched'
 _OWNER = '_ai_glance_slot_owner'
+BAR_BACKGROUND = '#000000'
+BAR_FOREGROUND = '#d3d7cf'  # neutral text (email, "updated N min ago"), readable on black
+
+
+def _style(widget, css):
+    provider = Gtk.CssProvider()
+    provider.load_from_data(css.encode())
+    widget.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
 
 class _Bar:
@@ -38,6 +49,7 @@ class _Bar:
         self.slot = Gtk.Box()
         self.slot.__dict__[_OWNER] = window
         self.label = Gtk.Label()
+        self.box = Gtk.EventBox()
         self.wrapper = Gtk.VBox()
         self.dead = False
         self.generation = 0
@@ -51,15 +63,27 @@ class _Bar:
         self.label.set_ellipsize(3)  # Pango.EllipsizeMode.END
         self.label.set_use_markup(True)
         self.label.set_markup('Claude usage: \u2026')
+        self.label.set_margin_top(2)
+        self.label.set_margin_bottom(2)
         self.label.get_style_context().add_class('ai-glance-usage')
+        self.box.add(self.label)
+        # Providers are attached to these two widgets only, never to the screen.
+        self.box.get_style_context().add_class('ai-glance-usage-bar')
+        _style(self.box, f'* {{ background-color: {BAR_BACKGROUND}; }}')
+        _style(self.label, f'* {{ color: {BAR_FOREGROUND}; }}')
         self.wrapper.pack_start(self.slot, True, True, 0)
         self.wrapper.pack_start(Gtk.Separator(), False, False, 0)
-        self.wrapper.pack_start(self.label, False, False, 2)
+        self.wrapper.pack_start(self.box, False, False, 0)
         self.slot.show()
         self.wrapper.get_children()[1].show()
         self.label.show()
+        self.box.show()
         self.wrapper.show()
         self.wrapper.connect('destroy', self._on_destroy)
+
+    def add_child(self, widget):
+        """Put ``widget`` in the slot so it gets the slot's whole allocation."""
+        self.slot.pack_start(widget, True, True, 0)
 
     def start(self):
         self.sources.append(GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick))
@@ -136,7 +160,7 @@ def _redirect_gtk_window(window, bar):
 
     def add(win, widget):
         if win is window and widget is not bar.wrapper:
-            return bar.slot.add(widget)
+            return bar.add_child(widget)
         return orig_add(win, widget)
 
     def remove(win, widget):
@@ -165,7 +189,7 @@ def _wrap(window, child=None):
     try:
         if child is not None:
             Gtk.Window.remove(window, child)
-            bar.slot.add(child)
+            bar.add_child(child)
         Gtk.Window.add(window, bar.wrapper)
     except Exception as exc:
         dbg(f'ai-glance usage bar: cannot wrap window: {exc!r}')
