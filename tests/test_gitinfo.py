@@ -165,3 +165,40 @@ def test_git_failure_isolated(env, monkeypatch):
     assert set(by_name) == {"repo_a", "repo_b"}
     assert by_name["repo_b"].error
     assert by_name["repo_a"].error is None
+
+
+def _wt(path, branch):
+    return gitinfo.WorktreeState(Path(path), branch, 'abc1234', 0, 0, False, False, False, None)
+
+
+def _repo(current_index=0):
+    wts = tuple(_wt(f'/w/{n}', n) for n in ('main', 'a', 'b', 'c'))
+    return gitinfo.RepoState(Path('/w/main'), 'r', 'origin/main', wts, None, wts[current_index])
+
+
+def test_repo_rows_no_omp_shows_only_current():
+    repo = _repo(1)
+    current, extra, current_in_use = gitinfo.repo_rows(repo, set())
+    assert current is repo.worktrees[1] and extra == [] and current_in_use is False
+
+
+def test_repo_rows_in_use_exactly_those():
+    repo = _repo(0)
+    wa, wb = repo.worktrees[1], repo.worktrees[2]
+    current, extra, current_in_use = gitinfo.repo_rows(repo, {wa.path, wb.path})
+    assert current is repo.worktrees[0] and extra == [wa, wb] and current_in_use is False
+
+
+def test_repo_rows_current_in_use_not_duplicated():
+    repo = _repo(1)
+    cur, other = repo.worktrees[1], repo.worktrees[3]
+    current, extra, current_in_use = gitinfo.repo_rows(repo, {cur.path, other.path})
+    assert current is cur and extra == [other] and current_in_use is True
+    assert cur not in extra
+
+
+def test_repo_rows_ignores_unknown_paths_and_empty_repo():
+    repo = _repo(0)
+    assert gitinfo.repo_rows(repo, {Path('/elsewhere')})[1] == []
+    empty = gitinfo.RepoState(Path('/x'), 'x', None, (), 'boom', None)
+    assert gitinfo.repo_rows(empty, {Path('/x')}) == (None, [], False)

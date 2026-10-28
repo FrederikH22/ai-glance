@@ -183,6 +183,11 @@ check('3: panel lists the current branch and the base, no worktree list',
       pump(8.0, lambda: branch in label_texts(panel) and 'origin/main' in text_of(panel)), text_of(panel)[:400])
 check('8: no omp -> no worktree rows and no omp badge',
       not omp_rows(panel) and 'omp' not in label_texts(panel) and '◆' not in text_of(panel))
+_cur = model.repos[0].current.path if model.repos[0].current else wt_paths[0]
+_short = lambda p: str(p).replace(str(HOME), '~')  # noqa: E731
+check('8: no label shows the path of any non-current worktree (no omp)',
+      not any(_short(p) in label_texts(panel) or str(p) in label_texts(panel)
+              for p in wt_paths if p != _cur))
 check('3: several worktrees exist (live repo state varies)', len(wt_paths) >= 3, len(wt_paths))
 check('2: no new split, vte still in the pane',
       sum(1 for w in descendants(window) if isinstance(w, Paned)) == paneds_before
@@ -203,6 +208,8 @@ short = lambda p: str(p).replace(str(HOME), '~')  # noqa: E731
 check('8: exactly the two in-use worktrees get rows (path, branch pill)',
       len(rows) == 2 and row_paths == {short(p) for p in targets}, (row_paths, targets))
 check('8: omp badge in the header', 'omp' in label_texts(panel))
+check('8: no non-target worktree path is listed',
+      not any(_short(p) in label_texts(panel) for p in wt_paths if p not in targets))
 shot('accept-highlight.png')
 if SHOTS:
     pump(0.5)

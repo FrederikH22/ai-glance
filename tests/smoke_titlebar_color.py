@@ -183,7 +183,11 @@ check('old pane returned to the stock inactive colour',
 # --- broadcast keeps stock colours -------------------------------------------------------
 terminator.groupsend = terminator.groupsend_type['all']
 pump(0.5)
-check('broadcast: animation off, timer stopped', not tc.is_active(tb) and not tc.timer_running())
+check('broadcast: animation off for the focused pane', not tc.is_active(tb))
+terminator.groupsend = terminator.groupsend_type['off']
+pump(0.5)
+check('broadcast ended while the pane stays focused: animation resumes without refocus',
+      tc.is_active(tb) and tc.timer_running())
 terminator.groupsend = terminator.groupsend_type['group']
 focus(term_a)
 check('default group mode without a group still animates', tc.is_active(ta) and tc.timer_running())

@@ -8,7 +8,8 @@ that runs before the titlebar's children, and their ``Terminal`` paints a 3 px
 frame with the same gradient in a ``draw`` handler that runs after its children
 (inside its own allocation, so it never touches neighbouring panes). One module
 level 100 ms timer queues redraws; it only exists while a registered titlebar's
-window has toplevel focus. Broadcasting (all, or group with the pane in a group) keeps stock colours. The colour is a pure function of ``time.monotonic()``
+window has toplevel focus (a focused pane paused by broadcast keeps a cheap
+check running and resumes when broadcast ends). Broadcasting (all, or group with the pane in a group) keeps stock colours. The colour is a pure function of ``time.monotonic()``
 so painting needs no per-widget state. Any other ``update`` state unregisters
 the titlebar and the stock colours (set by the original ``update``) apply.
 """
@@ -32,6 +33,7 @@ _ACTIVE = '_ai_glance_color_active'
 _HOOKED = '_ai_glance_color_hooked'
 
 _registered = set()
+_waiting = set()  # focused panes whose animation is paused by broadcast
 _timer = None
 
 
@@ -101,6 +103,11 @@ def _transparent():
     return Gdk.RGBA(0, 0, 0, 0)
 
 
+def _on_destroy(titlebar):
+    _waiting.discard(titlebar)
+    _unregister(titlebar, restore=False)
+
+
 def _hook(titlebar):
     if titlebar.__dict__.get(_HOOKED):
         return
@@ -112,7 +119,7 @@ def _hook(titlebar):
         painters.add(parent)  # the Gtk.Viewport around the title label
     for widget in painters:
         widget.connect('draw', _paint_header, titlebar)
-    titlebar.connect('destroy', lambda tb: _unregister(tb, restore=False))
+    titlebar.connect('destroy', _on_destroy)
     terminal = titlebar.terminal
     if terminal is not None:
         terminal.connect_after('draw', _paint_frame)
@@ -158,10 +165,21 @@ def _unregister(titlebar, restore=True):
 
 
 def _queue(titlebar):
-    titlebar.queue_draw()
+    """Invalidate only what the gradient covers: the header and the four frame strips
+    (all in the Terminal's coordinates); the VTE interior is not repainted."""
     terminal = titlebar.terminal
-    if terminal is not None:
-        terminal.queue_draw()
+    if terminal is None:
+        titlebar.queue_draw()
+        return
+    width, height = terminal.get_allocated_width(), terminal.get_allocated_height()
+    pos = titlebar.translate_coordinates(terminal, 0, 0)
+    rects = [(0, 0, width, FRAME_WIDTH), (0, height - FRAME_WIDTH, width, FRAME_WIDTH),
+             (0, 0, FRAME_WIDTH, height), (width - FRAME_WIDTH, 0, FRAME_WIDTH, height)]
+    if pos is not None:
+        rects.append((pos[0], pos[1], titlebar.get_allocated_width(),
+                      titlebar.get_allocated_height()))
+    for rect in rects:
+        terminal.queue_draw_area(*rect)
 
 
 def _window_active(titlebar):
@@ -169,20 +187,39 @@ def _window_active(titlebar):
     return isinstance(window, Gtk.Window) and window.is_active()
 
 
+def _pause(titlebar):
+    """Broadcast started while this pane stays focused: stock colours, resume later."""
+    _unregister(titlebar, restore=False)
+    _waiting.add(titlebar)
+    _ensure_timer()
+
+
+def _resume_waiting():
+    for titlebar in list(_waiting):
+        try:
+            if titlebar.get_parent() is None or not _window_active(titlebar):
+                _waiting.discard(titlebar)
+            elif not _broadcasting(titlebar):
+                _waiting.discard(titlebar)
+                titlebar.update(titlebar.terminal)  # registers again via the hook
+        except Exception as exc:
+            _waiting.discard(titlebar)
+            dbg(f'ai-glance titlebar colour: resume failed: {exc!r}')
+
+
 def _tick():
     global _timer
     try:
-        live = []
         for titlebar in list(_registered):
             if titlebar.get_parent() is None:
                 _unregister(titlebar, restore=False)
             elif _broadcasting(titlebar):
-                _unregister(titlebar)
-            elif _window_active(titlebar):
-                live.append(titlebar)
+                titlebar.update(titlebar.terminal)  # stock colours; the hook pauses it
+        _resume_waiting()
+        live = [t for t in _registered if _window_active(t)]
         for titlebar in live:
             _queue(titlebar)
-        if live:
+        if live or _waiting:
             return True
     except Exception as exc:
         dbg(f'ai-glance titlebar colour: tick failed: {exc!r}')
@@ -203,11 +240,17 @@ def timer_running():
 def _after_update(titlebar, other):
     if not other or isinstance(other, str):
         if other:  # 'window-focus-out' and friends: stock inactive colours
+            _waiting.discard(titlebar)
             _unregister(titlebar, restore=False)
         return
-    if other is titlebar.terminal and not _broadcasting(titlebar):
-        _register(titlebar)
+    if other is titlebar.terminal:
+        if _broadcasting(titlebar):
+            _pause(titlebar)
+        else:
+            _waiting.discard(titlebar)
+            _register(titlebar)
     else:
+        _waiting.discard(titlebar)
         _unregister(titlebar, restore=False)
 
 

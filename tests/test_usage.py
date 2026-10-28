@@ -277,3 +277,21 @@ def test_bar_segments_fraction_clamped_and_error():
     assert usage.bar_segments(snap, NOW).accounts[0].windows[0].fraction == 1.0
     bad = usage.bar_segments(usage.UsageSnapshot((), None, 'agent.db not found'), NOW)
     assert bad.error == 'agent.db not found' and bad.accounts == () and bad.tooltip == bad.error
+
+
+def test_short_label_strips_known_provider_words():
+    assert usage.short_label('Claude Sonnet 7 Day') == 'Sonnet 7d'
+    assert usage.short_label('Codex 5 Hour') == '5h'
+    assert usage.short_label('GPT 7 Day') == '7d'
+    assert usage.short_label('Foo 5 Hour') == '5h'  # generic fallback
+
+
+def test_severity_uses_displayed_percent():
+    for frac, sev, pct in [(0.595, 'warning', '60%'), (0.5949, 'normal', '59%'),
+                           (0.795, 'error', '80%'), (0.7949, 'warning', '79%')]:
+        w = _sev_window(frac)
+        assert usage.severity(w, NOW) == sev, frac
+        snap = usage.UsageSnapshot((usage.AccountUsage('a@x.io', (w,)),), NOW, None)
+        markup, _, _ = usage.format_bar(snap, NOW)
+        assert pct in _plain(markup)
+        assert usage.bar_segments(snap, NOW).accounts[0].windows[0].severity == sev

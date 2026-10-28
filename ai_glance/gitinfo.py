@@ -41,6 +41,19 @@ class PanelModel:
     repos: tuple[RepoState, ...]
 
 
+def repo_rows(repo: RepoState, in_use) -> tuple[WorktreeState | None, list[WorktreeState], bool]:
+    """What the panel renders for ``repo``: ``(current, omp_worktrees, current_in_use)``.
+
+    Only the checkout the pane is in; additionally, when omp is live in the pane
+    (``in_use`` non-empty), exactly the in-use worktrees, never ``current`` twice
+    (its in-use state is returned as the third item instead).
+    """
+    current = repo.current or (repo.worktrees[0] if repo.worktrees else None)
+    current_path = current.path if current is not None else None
+    extra = [wt for wt in repo.worktrees if wt.path in in_use and wt.path != current_path]
+    return current, extra, current_path is not None and current_path in in_use
+
+
 def _git(args: list[str], cwd: Path, timeout: float) -> str:
     return subprocess.run(
         ["git", "--no-optional-locks", *args],

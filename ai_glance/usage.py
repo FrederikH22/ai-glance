@@ -83,10 +83,15 @@ class UsageSnapshot:
     error: str | None
 
 
+_PROVIDER_WORDS = {'claude', 'codex', 'grok', 'gpt', 'gemini', 'cursor', 'openai', 'anthropic', 'xai'}
+
+
 def short_label(label: str) -> str:
     s = label.strip()
     first, _, rest = s.partition(' ')
-    if first.isalpha() and rest[:1].isdigit():  # leading provider word: Claude, Codex, Grok
+    if first.lower() in _PROVIDER_WORDS and rest:
+        s = rest
+    elif first.isalpha() and rest[:1].isdigit():  # unknown provider word before a window size
         s = rest
     s = s.replace(' Hour', 'h').replace(' Day', 'd')
     parts = s.split(' ', 1)
@@ -162,10 +167,16 @@ def read_usage(db_path: Path = DEFAULT_DB) -> UsageSnapshot:
         return UsageSnapshot((), None, f'{type(exc).__name__}: {exc}')
 
 
+def percent(w: UsageWindow) -> int:
+    """The percentage shown for ``w``; severity is decided on this same number."""
+    return round(w.used_fraction * 100)
+
+
 def severity(w: UsageWindow, now: datetime) -> Severity:
-    if w.status != 'ok' or w.used_fraction >= ERROR_AT:
+    pct = percent(w)
+    if w.status != 'ok' or pct >= round(ERROR_AT * 100):
         return 'error'
-    if w.used_fraction >= WARNING_AT:
+    if pct >= round(WARNING_AT * 100):
         return 'warning'
     return 'normal'
 
@@ -182,7 +193,7 @@ def _reset_text(w: UsageWindow, now: datetime) -> str | None:
 
 
 def _window_text(w: UsageWindow, now: datetime) -> str:
-    text = f'{w.short} {round(w.used_fraction * 100)}%'
+    text = f'{w.short} {percent(w)}%'
     if severity(w, now) == 'error':
         text += ' \u26d4'
     reset = _reset_text(w, now)
@@ -193,7 +204,7 @@ def _window_text(w: UsageWindow, now: datetime) -> str:
 
 def _window_detail(w: UsageWindow, now: datetime) -> str:
     """Tooltip line: usage plus the exact local reset time, whatever the severity."""
-    text = f'{w.short} {round(w.used_fraction * 100)}%'
+    text = f'{w.short} {percent(w)}%'
     if severity(w, now) == 'error':
         text += ' \u26d4'
     if w.resets_at is None:
@@ -306,7 +317,7 @@ def bar_segments(snap: UsageSnapshot, now: datetime) -> BarModel:
             if _RANK[sev] > _RANK[worst]:
                 worst = sev
             windows.append(BarWindow(
-                w.short, min(1.0, max(0.0, w.used_fraction)), round(w.used_fraction * 100),
+                w.short, min(1.0, max(0.0, w.used_fraction)), percent(w),
                 sev, _COLORS[sev], _reset_text(w, now)))
         bg, fg = badge_colors(acc.provider)
         accounts.append(BarAccount(

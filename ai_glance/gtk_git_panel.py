@@ -103,18 +103,6 @@ def _state_widgets(wt):
     return out
 
 
-def repo_rows(repo, in_use):
-    """Which states to show for ``repo``: (current, omp_worktrees, current_in_use).
-
-    Only the checkout the pane is in; additionally, when omp is live in the pane,
-    the in-use worktrees (never ``current`` twice).
-    """
-    current = repo.current or (repo.worktrees[0] if repo.worktrees else None)
-    current_path = current.path if current is not None else None
-    extra = [wt for wt in repo.worktrees if wt.path in in_use and wt.path != current_path]
-    return current, extra, current_path is not None and current_path in in_use
-
-
 _logged_errors: set = set()
 
 
@@ -286,7 +274,7 @@ class GitPanel(Gtk.Box):
         ctx.add_class('gg-repo')
         if first:
             ctx.add_class('gg-first')
-        current, extra, current_in_use = repo_rows(repo, in_use)
+        current, extra, current_in_use = gitinfo.repo_rows(repo, in_use)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         glyph = _pill('\u2387', 'gg-glyph')
         name = _pill(repo.name, 'gg-name')
