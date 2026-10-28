@@ -114,7 +114,14 @@ children = term.get_children()
 check('panel directly after titlebar',
       len(panels) == 1 and children.index(panels[0]) == children.index(term.titlebar) + 1)
 check('panel shows branch row',
-      pump(5, lambda: bool(panels) and branch in labels_text(panels[0])))
+      bool(branch) and pump(5, lambda: bool(panels) and branch in labels_text(panels[0])))
+check('no omp on this pane: no ◆ marker anywhere', '◆' not in labels_text(panels[0]))
+labels_before = [w for w in descendants(panels[0]) if isinstance(w, Gtk.Label)]
+panels[0].refresh()
+pump(5, lambda: not panels[0]._in_flight)
+labels_after = [w for w in descendants(panels[0]) if isinstance(w, Gtk.Label)]
+check('unchanged refresh keeps the same label widgets',
+      bool(labels_before) and labels_before == labels_after)
 check('vte still descendant of term', term.vte in list(descendants(term)))
 check('no new Paned', count_paned(window) == paneds_before)
 if len(sys.argv) > 1 and shutil.which('import'):
@@ -124,6 +131,34 @@ if len(sys.argv) > 1 and shutil.which('import'):
 
 gtk_git_panel.toggle(term)
 check('second toggle removes panel', not panel_of(term))
+check('closed panel: _closed and timer removed',
+      panels[0]._closed and panels[0]._timer is None)
+
+# stale result discard: hold the worker, close the panel, release
+import threading  # noqa: E402
+from ai_glance import gitinfo  # noqa: E402
+gate = threading.Event()
+started = threading.Event()
+real_build = gitinfo.build_model
+
+
+def slow_build(*a, **k):
+    started.set()
+    gate.wait(10)
+    return real_build(*a, **k)
+
+
+gitinfo.build_model = slow_build
+gtk_git_panel.toggle(term)
+stale = panel_of(term)[0]
+renders = []
+stale._render = lambda *a, **k: renders.append(a)
+check('stale: worker started and in flight', started.wait(5) and stale._in_flight)
+gtk_git_panel.toggle(term)  # close while in flight
+gate.set()
+pump(2, lambda: not stale._in_flight)
+gitinfo.build_model = real_build
+check('stale: result dropped (no render after close)', not renders and not stale._in_flight)
 
 term.key_split_vert()
 pump(1.0)
@@ -136,9 +171,11 @@ other.spawn_child() if other.pid is None else None
 pump(0.5)
 gtk_git_panel.toggle(other)
 pump(0.1)
+other_panel = panel_of(other)[0]
 other.close()  # refresh in flight
 pump(5)
-check('close with refresh in flight: survived', True)
+check('close with refresh in flight: panel shut down',
+      other_panel._closed and other_panel._timer is None)
 
 survivor = [t for t in terminator.terminals if t is not other]
 victim = survivor[0] if survivor else term
@@ -149,7 +186,11 @@ if victim.pid:
     pump(0.5)
 gtk_git_panel.toggle(victim)
 pump(2)
-check('killed child: panel renders', len(panel_of(victim)) == 1)
+vpanels = panel_of(victim)
+vtext = labels_text(vpanels[0]) if vpanels else ''
+check('killed child: panel rendered n/a or real content',
+      len(vpanels) == 1 and 'Loading' not in vtext and
+      ('n/a' in vtext or 'repo' in vtext or 'Not a git repository' in vtext))
 pump(4)
 
 os.dup2(_real_stderr, 2)

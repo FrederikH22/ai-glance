@@ -11,7 +11,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import GLib, Gtk, Gdk  # noqa: E402
 
-from terminatorlib.util import dbg, err  # noqa: E402
+from terminatorlib.util import dbg  # noqa: E402
 
 from . import gitinfo, ompsessions  # noqa: E402
 
@@ -39,14 +39,14 @@ def _short_path(path):
     return p
 
 
-def _worktree_markup(wt, in_use, here):
+def _worktree_markup(wt, in_use):
     """Pango markup for one worktree row."""
     if wt.branch:
         branch = wt.branch
     else:
         branch = 'detached @%s' % (wt.head or '')[:7]
     parts = []
-    marker = '◆ ' if in_use else ('▶ ' if here else '')
+    marker = '◆ ' if in_use else ''
     parts.append(_esc(marker) + _esc(_short_path(wt.path)))
     parts.append('<i>%s</i>' % _esc(branch))
     if wt.prunable:
@@ -90,27 +90,15 @@ def _repo_markup(repo, show_base):
 
 
 def _compute(cwd, pid):
-    """Worker-thread computation. Returns (model, in_use, here) or None."""
+    """Worker-thread computation. Returns (model, in_use) or None."""
     try:
         model = gitinfo.build_model(Path(cwd))
         paths = [wt.path for repo in model.repos for wt in repo.worktrees]
         in_use = ompsessions.pane_worktrees_in_use(
             pid, paths, datetime.now(timezone.utc))
-        here = None
-        try:
-            real = Path(cwd).resolve()
-            for p in paths:
-                try:
-                    real.relative_to(p)
-                except ValueError:
-                    continue
-                if here is None or len(p.parts) > len(here.parts):
-                    here = p
-        except Exception:
-            here = None
-        return model, set(in_use), here
+        return model, set(in_use)
     except Exception as exc:  # never raise into Terminator
-        err('ai_glance git panel: refresh failed: %r' % (exc,))
+        dbg('ai_glance git panel: refresh failed: %r' % (exc,))
         return None
 
 
@@ -135,6 +123,8 @@ class GitPanel(Gtk.Box):
         self.pack_end(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                       False, False, 0)
         self._provider = None
+        self._last_key = None
+        self._close_id = None
         self._apply_colors()
         self._set_text('Loading…')
         self.connect('destroy', self._on_destroy)
@@ -159,12 +149,22 @@ class GitPanel(Gtk.Box):
 
     # lifecycle ---------------------------------------------------------
     def start(self):
+        self._close_id = self._term.connect('close-term', self._on_term_close)
         self._timer = GLib.timeout_add_seconds(REFRESH_SECONDS, self._on_timer)
         self.refresh()
+
+    def _on_term_close(self, _term):
+        self.shutdown()
 
     def shutdown(self):
         self._closed = True
         self._gen += 1
+        if self._close_id is not None:
+            try:
+                self._term.disconnect(self._close_id)
+            except Exception:
+                pass
+            self._close_id = None
         if self._timer is not None:
             GLib.source_remove(self._timer)
             self._timer = None
@@ -190,7 +190,7 @@ class GitPanel(Gtk.Box):
             dbg('ai_glance git panel: cwd unavailable: %r' % (exc,))
             cwd, pid = None, None
         if not cwd:
-            self._render(None, set(), None)
+            self._render(None, set())
             return
         self._in_flight = True
         gen = self._gen
@@ -207,11 +207,11 @@ class GitPanel(Gtk.Box):
             return False
         try:
             if result is None:
-                self._render(None, set(), None)
+                self._render(None, set())
             else:
                 self._render(*result)
         except Exception as exc:
-            err('ai_glance git panel: render failed: %r' % (exc,))
+            dbg('ai_glance git panel: render failed: %r' % (exc,))
         return False
 
     # rendering ---------------------------------------------------------
@@ -236,8 +236,12 @@ class GitPanel(Gtk.Box):
         self._style(label)
         self._content.pack_start(label, False, False, 0)
 
-    def _render(self, model, in_use, here):
+    def _render(self, model, in_use):
         self._update_max_height()
+        key = (model, frozenset(in_use))
+        if key == self._last_key:
+            return
+        self._last_key = key
         if model is None:
             self._set_text('Git status: n/a')
             return
@@ -266,7 +270,7 @@ class GitPanel(Gtk.Box):
             self._add_markup(_repo_markup(repo, show_base))
             for wt in repo.worktrees:
                 self._add_markup(
-                    _worktree_markup(wt, wt.path in in_use, wt.path == here),
+                    _worktree_markup(wt, wt.path in in_use),
                     indent=16)
         self._content.show_all()
 
@@ -300,7 +304,7 @@ def toggle(terminal):
         panel.show_all()
         panel.start()
     except Exception as exc:
-        err('ai_glance git panel: toggle failed: %r' % (exc,))
+        dbg('ai_glance git panel: toggle failed: %r' % (exc,))
 
 
 # --- titlebar button -----------------------------------------------------
@@ -323,7 +327,7 @@ def _add_button(titlebar):
         hbox.reorder_child(button, 0)
         button.show()
     except Exception as exc:
-        err('ai_glance git panel: button failed: %r' % (exc,))
+        dbg('ai_glance git panel: button failed: %r' % (exc,))
 
 
 def install():
@@ -344,4 +348,4 @@ def install():
             if getattr(term, 'titlebar', None) is not None:
                 _add_button(term.titlebar)
     except Exception as exc:
-        err('ai_glance git panel: retrofit failed: %r' % (exc,))
+        dbg('ai_glance git panel: retrofit failed: %r' % (exc,))
