@@ -118,6 +118,9 @@ check('bar model matches bar_segments(read_usage())',
 check('real DB: at least one account group with a level bar',
       bool(expected) and any(isinstance(w, gtk_usage_bar._LevelBar) for w in descendants(bar.box)))
 check(f'bar is compact (<= 28 px): {bar.box.get_allocated_height()}', 0 < bar.box.get_allocated_height() <= 28)
+_slot, _box = bar.slot.get_allocation(), bar.box.get_allocation()
+check(f'no gap between terminals and bar (slot ends {_slot.y + _slot.height}, bar starts {_box.y})',
+      _box.y == _slot.y + _slot.height and _box.y + _box.height == bar.wrapper.get_allocated_height())
 badge = [w for w in descendants(bar.box) if isinstance(w, Gtk.Label)
          and w.get_text() == expected[0].provider_name]
 check('provider badge shows the provider name', len(badge) == 1)

@@ -1,7 +1,7 @@
 """Per-window Claude usage bar for Terminator.
 
 Each Terminator ``Window`` gets its real GTK child replaced by a wrapper box
-``[slot, separator, bar]`` (the bar is an EventBox with an opaque black
+``[slot, bar]`` (the bar is an EventBox with an opaque black
 background; Terminator windows use an RGBA visual, so unpainted areas would be
 see-through). The slot packs its child with expand+fill so it always receives
 the whole allocation. The Terminator child (Terminal/Paned/Notebook) lives
@@ -117,11 +117,10 @@ class _Bar:
         self.box.get_style_context().add_class('ai-glance-usage-bar')
         _style(self.box, f'* {{ background-color: {BAR_BACKGROUND}; }}')
         _style(self.label, f'* {{ color: {BAR_MUTED}; {BAR_FONT} }}')
+        # No separator: on an RGBA window it would show as a see-through gap.
         self.wrapper.pack_start(self.slot, True, True, 0)
-        self.wrapper.pack_start(Gtk.Separator(), False, False, 0)
         self.wrapper.pack_start(self.box, False, False, 0)
         self.slot.show()
-        self.wrapper.get_children()[1].show()
         self.label.show()
         self.content.show()
         self.box.show()
