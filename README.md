@@ -15,7 +15,11 @@ A Terminator 2.1.3 plugin for working with AI coding agents (omp) across git wor
     bash install.sh              # symlinks into ~/.config/terminator/plugins, enables AiGlance
     bash install.sh --uninstall  # removes the symlinks and the AiGlance entry
 
-Both back up the Terminator config to `~/.config/terminator/config.bak-ai-glance` first.
+Only the `enabled_plugins` line in `[global_config]` is edited (comments and other keys are
+kept). Whenever that line has to change, the previous config is first copied to
+`~/.config/terminator/config.bak-ai-glance` (overwriting an older backup), and the file is
+re-read afterwards; the script exits non-zero if the result is not as intended. A re-run
+that has nothing to change touches neither the config nor the backup.
 **Restart Terminator after installing or uninstalling**; open windows are not changed
 until then. Terminator's title bars must be on (the
 `show_titlebar` option, on by default), otherwise there is no place for the git button.
