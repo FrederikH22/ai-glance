@@ -18,8 +18,9 @@ from typing import Literal
 DEFAULT_DB = Path.home() / '.omp/agent/agent.db'
 # Live usage: omp fetches the provider limits itself. None disables it (history only).
 OMP_COMMAND: tuple[str, ...] | None = ('omp', 'usage', '--json', '--no-extensions')
-# omp caches usage reports for minutes; clear that cache so the fetch is really live.
-OMP_INVALIDATE: tuple[str, ...] | None = ('omp', 'usage', 'invalidate', '--no-extensions')
+# No `omp usage invalidate`: Anthropic's usage endpoint is IP rate-limited (429 when polled
+# every minute). omp caches a report for 5 min and refreshes its numbers from the response
+# headers of every Claude request (metadata.headersUpdatedAt), so its cache is current.
 LIVE_TIMEOUT_S = 20
 LIVE_MIN_INTERVAL_S = 50  # all bars share one fetch per interval
 
@@ -198,7 +199,9 @@ def parse_omp_usage(payload: dict, kinds: dict[tuple[str, str], str]) -> UsageSn
     for report in payload.get('reports') or ():
         provider = report.get('provider') or ''
         meta = report.get('metadata') or {}
-        fetched = _ms(report.get('fetchedAt')) or _ms(payload.get('generatedAt'))
+        stamps = [_ms(report.get('fetchedAt')), _ms(meta.get('headersUpdatedAt')),
+                  _ms(payload.get('generatedAt')) if report.get('fetchedAt') is None else None]
+        fetched = max((s for s in stamps if s is not None), default=None)
         if not provider or fetched is None:
             continue
         email = meta.get('email') or ''
@@ -253,43 +256,49 @@ def _run(command: tuple[str, ...]) -> str:
                           env=env, stdin=subprocess.DEVNULL, check=True).stdout
 
 
-def read_live_usage(db_path: Path = DEFAULT_DB,
-                    command: tuple[str, ...] | None = OMP_COMMAND,
-                    invalidate: tuple[str, ...] | None = None) -> UsageSnapshot:
-    """Live limits from ``omp usage --json`` (after running ``invalidate``, if
-    given, so omp fetches fresh numbers instead of serving its cache); on any
-    failure the latest agent.db history (``read_usage``). Never raises."""
-    if not command:
-        return read_usage(db_path)
+def _fetch_live(db_path: Path, command: tuple[str, ...]) -> UsageSnapshot | None:
+    """Snapshot from ``omp usage --json``, or None if omp fails or reports nothing."""
     try:
-        if invalidate:
-            try:
-                _run(invalidate)
-            except Exception:  # noqa: BLE001 - a cached report is still better than none
-                pass
         snap = parse_omp_usage(json.loads(_run(command)), _read_kinds(Path(db_path)))
-        if snap.error is None:
-            return snap
-    except Exception:  # noqa: BLE001 - fall back to the recorded history
-        pass
-    return read_usage(db_path)
+        return snap if snap.error is None else None
+    except Exception:  # noqa: BLE001 - caller falls back
+        return None
+
+
+def read_live_usage(db_path: Path = DEFAULT_DB,
+                    command: tuple[str, ...] | None = OMP_COMMAND) -> UsageSnapshot:
+    """Live limits from ``omp usage --json``; on any failure the latest agent.db
+    history (``read_usage``). Never raises."""
+    live = _fetch_live(db_path, command) if command else None
+    return live if live is not None else read_usage(db_path)
 
 
 _live_lock = threading.Lock()
 _live_cache: dict[tuple, tuple[float, UsageSnapshot]] = {}
+_last_good: dict[tuple, UsageSnapshot] = {}
 
 
 def read_current_usage(db_path: Path = DEFAULT_DB,
-                       command: tuple[str, ...] | None = OMP_COMMAND,
-                       invalidate: tuple[str, ...] | None = None) -> UsageSnapshot:
+                       command: tuple[str, ...] | None = OMP_COMMAND) -> UsageSnapshot:
     """``read_live_usage`` shared by every caller: at most one omp run per
-    ``LIVE_MIN_INTERVAL_S`` for the same (db, command). Never raises."""
+    ``LIVE_MIN_INTERVAL_S`` for the same (db, command). When omp has nothing (fetch
+    failed or rate-limited), the newer of the last good live snapshot and the agent.db
+    history is returned. Never raises."""
     key = (str(db_path), command)
     with _live_lock:
         hit = _live_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < LIVE_MIN_INTERVAL_S:
             return hit[1]
-        snap = read_live_usage(db_path, command, invalidate)
+        live = _fetch_live(db_path, command) if command else None
+        if live is not None:
+            _last_good[key] = live
+            snap = live
+        else:
+            hist = read_usage(db_path)
+            last = _last_good.get(key)
+            newer = last is not None and (hist.updated_at is None
+                                          or last.updated_at > hist.updated_at)
+            snap = last if newer else hist
         _live_cache.clear()
         _live_cache[key] = (time.monotonic(), snap)
         return snap

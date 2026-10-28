@@ -303,9 +303,9 @@ finally:
 # destroy while a read is in flight
 orig_read = usage.read_current_usage
 try:
-    def slow_read(path, command, invalidate=None):
+    def slow_read(path, command):
         time.sleep(0.6)
-        return orig_read(path, command, invalidate)
+        return orig_read(path, command)
     usage.read_current_usage = slow_read
     window3, _term3 = terminator.new_window()
     pump(0.2)

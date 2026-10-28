@@ -383,18 +383,26 @@ def test_bar_says_just_now_for_fresh_data():
     assert usage.bar_segments(snap, NOW + timedelta(seconds=20)).updated == 'updated just now'
 
 
-def test_live_usage_invalidates_omp_cache_first(tmp_path):
+
+def test_header_refresh_time_counts_as_updated():
+    payload = omp_payload(fetched=NOW - timedelta(minutes=4))
+    payload['reports'][0]['metadata']['headersUpdatedAt'] = ms(NOW - timedelta(seconds=30))
+    snap = usage.parse_omp_usage(payload, {})
+    assert snap.updated_at == NOW - timedelta(seconds=30)
+    assert usage.bar_segments(snap, NOW).updated == 'updated just now'
+
+
+def test_failed_fetch_keeps_last_good_live_numbers(tmp_path, monkeypatch):
     db = tmp_path / 'agent.db'
-    make_db(db, [])
-    log = tmp_path / 'order'
-    inval = tmp_path / 'inval.py'
-    inval.write_text(f'open({str(log)!r}, "a").write("invalidate\\n")\n')
-    fetch = tmp_path / 'fetch.py'
-    fetch.write_text(f'import sys\nopen({str(log)!r}, "a").write("fetch\\n")\n'
-                     f'sys.stdout.write({json.dumps(omp_payload(frac=0.5))!r})\n')
-    snap = usage.read_live_usage(db, ('python3', str(fetch)), ('python3', str(inval)))
-    assert log.read_text().split() == ['invalidate', 'fetch']
-    assert snap.accounts[0].windows[0].used_fraction == 0.5
-    # a failing invalidate still fetches (omp's cached report beats the hourly history)
-    snap = usage.read_live_usage(db, ('python3', str(fetch)), ('/nonexistent/omp',))
-    assert snap.accounts[0].windows[0].used_fraction == 0.5
+    make_db(db, [('acc-f', 'Claude 5 Hour', NOW - timedelta(minutes=40), 0.10, 'ok', None)])
+    good, _ = fake_omp(tmp_path, omp_payload(frac=0.42, fetched=NOW))
+    clock = [1000.0]
+    monkeypatch.setattr(usage.time, 'monotonic', lambda: clock[0])
+    usage._live_cache.clear()
+    usage._last_good.clear()
+    assert usage.read_current_usage(db, good).accounts[0].windows[0].used_fraction == 0.42
+    # omp now reports nothing (e.g. Anthropic answered 429): same command key, empty output
+    (tmp_path / 'omp.py').write_text('import sys; sys.stdout.write(\'{"reports": []}\')\n')
+    clock[0] += usage.LIVE_MIN_INTERVAL_S
+    snap = usage.read_current_usage(db, good)
+    assert snap.accounts[0].windows[0].used_fraction == 0.42  # not the 40 min old history
