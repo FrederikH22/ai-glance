@@ -240,6 +240,17 @@ logged-in account is always visible at the bottom of each Terminator window.
 - A reset time already in the past is shown as "reset" (the limit has rolled over
   since omp last looked).
 
+### Active pane colours (user round)
+
+- The active pane's title bar is painted with an animated two-hue gradient (hues
+  120° apart, HSV S=0.70 V=0.62, base hue rotating once per 12 s) instead of the
+  stock red, and the pane gets a 3 px frame with the same gradient, stroked inside
+  the pane's allocation. Inactive panes, window focus-out and real broadcasting
+  (`all`, or `group` for a pane that is in a group) keep the stock colours.
+  One 100 ms timer runs only while an active pane's window has focus.
+  Implemented in `ai_glance/gtk_titlebar_color.py`. The title bar height with the
+  plugin equals stock (±1 px).
+
 ## Acceptance (observable)
 
 1. With the plugin enabled, every pane in a new and in an already-open window

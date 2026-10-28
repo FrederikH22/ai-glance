@@ -11,7 +11,7 @@ AVAILABLE = ['AiGlance']
 
 
 class AiGlance(plugin.Plugin):
-    """Git/worktree panel button on every pane and a usage bar on every window."""
+    """Git/worktree panel button on every pane, a usage bar on every window, animated active-pane colours."""
 
     capabilities = ['ai_glance']
 
@@ -27,3 +27,9 @@ class AiGlance(plugin.Plugin):
             gtk_usage_bar.install()
         except Exception as exc:
             err('ai-glance: usage bar install failed: %r' % (exc,))
+
+        try:
+            from ai_glance import gtk_titlebar_color
+            gtk_titlebar_color.install()
+        except Exception as exc:
+            err('ai-glance: titlebar colour install failed: %r' % (exc,))
