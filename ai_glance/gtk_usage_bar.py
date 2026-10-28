@@ -137,6 +137,9 @@ class _Ticker(Gtk.ScrolledWindow):
             over = self.first.get_preferred_width()[1] > self.get_allocated_width() > 1
             if over != self.second.get_visible():
                 for part in (self.gap, self.second):
+                    # no_show_all keeps the bar's show_all() from revealing the repeat;
+                    # it must be lifted here, or show_all() is a no-op on it.
+                    part.set_no_show_all(not over)
                     if over:
                         part.show_all()
                     else:

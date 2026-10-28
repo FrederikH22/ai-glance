@@ -269,6 +269,34 @@ try:
     pump(0.2)
     check(f'a re-render keeps the scroll position ({_o2:.0f} -> {bar2.ticker.offset:.0f})',
           bar2.ticker.offset >= _o2)
+    # Endless loop: run fast through several full laps; the shown position must follow the
+    # offset everywhere (never stuck at the end of the line) and wrap around.
+    _speed = gtk_usage_bar.TICKER_SPEED
+    gtk_usage_bar.TICKER_SPEED = 3000
+    try:
+        tk = bar2.ticker
+        lap = tk.first.get_allocated_width() + gtk_usage_bar.TICKER_GAP
+        stuck, wraps, prev = [], 0, tk.offset
+        for _ in range(int(3 * lap / 3000 / 0.05) + 10):
+            pump(0.05)
+            value = tk.get_hadjustment().get_value()
+            if abs(value - tk.offset) > 1:
+                stuck.append((round(tk.offset), round(value)))
+            wraps += tk.offset < prev
+            prev = tk.offset
+        check(f'loops endlessly: {wraps} wraps, shown position follows the offset '
+              f'(stuck samples: {stuck[:3]})', wraps >= 2 and not stuck)
+        check('the repeat copy is visible while scrolling', tk.second.get_mapped())
+    finally:
+        gtk_usage_bar.TICKER_SPEED = _speed
+    window2.resize(3800, 400)
+    pump(1.0)
+    check(f'wide enough again: standing still at the start (width {window2.get_size()[0]})',
+          not bar2.ticker.scrolling() and bar2.ticker.get_hadjustment().get_value() == 0
+          and not bar2.ticker.second.get_visible())
+    window2.resize(800, 400)
+    pump(1.0)
+    check('narrow again: scrolling resumes', bar2.ticker.scrolling())
 finally:
     usage.read_current_usage = orig_read
 
