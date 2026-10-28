@@ -121,12 +121,13 @@ window.resize(1400, 600)
 pump(0.6)
 check(f'wide window: bar is one compact row (<= 28 px): {bar.box.get_allocated_height()}',
       0 < bar.box.get_allocated_height() <= 28)
+check('fits: the line stands still', bar.ticker is not None and not bar.ticker.scrolling())
 _slot, _box = bar.slot.get_allocation(), bar.box.get_allocation()
 check(f'no gap between terminals and bar (slot ends {_slot.y + _slot.height}, bar starts {_box.y})',
       _box.y == _slot.y + _slot.height and _box.y + _box.height == bar.wrapper.get_allocated_height())
-badge = [w for w in descendants(bar.box) if isinstance(w, Gtk.Label)
+badge = [w for w in descendants(bar.box) if isinstance(w, Gtk.Label) and w.get_mapped()
          and w.get_text() == expected[0].provider_name]
-check('provider badge shows the provider name', len(badge) == 1)
+check('provider badge shows the provider name (once: the repeat copy is hidden)', len(badge) == 1)
 
 
 def fills_slot(win, b, tol=1):
@@ -232,7 +233,7 @@ try:
 finally:
     usage.DEFAULT_DB, usage.OMP_COMMAND = orig_db, orig_cmd
 
-# several accounts: every account is shown and the bar wraps instead of widening the window
+# several accounts: all on one line that scrolls in a loop instead of widening the window
 def _report(acc, email):
     now_ms = int(time.time() * 1000)
     return {'provider': 'anthropic', 'fetchedAt': now_ms,
@@ -255,8 +256,19 @@ try:
     check(f'three accounts of one provider are all shown: {whos}',
           whos == ['account0@', 'account1@', 'account2@'])
     pump(0.5)
-    check(f'bar wraps instead of widening the window (width {window2.get_size()[0]})',
-          window2.get_size()[0] <= 900 and bar2.box.get_preferred_width()[0] <= 800)
+    check(f'one line, window not widened (width {window2.get_size()[0]}, '
+          f'bar height {bar2.box.get_allocated_height()})',
+          window2.get_size()[0] <= 900 and bar2.box.get_preferred_width()[0] <= 800
+          and 0 < bar2.box.get_allocated_height() <= 28)
+    check('too wide: the line scrolls', bar2.ticker is not None and bar2.ticker.scrolling())
+    _o1 = bar2.ticker.offset
+    pump(0.5)
+    _o2 = bar2.ticker.offset
+    check(f'scroll position advances ({_o1:.0f} -> {_o2:.0f})', _o2 != _o1)
+    bar2._rerender()
+    pump(0.2)
+    check(f'a re-render keeps the scroll position ({_o2:.0f} -> {bar2.ticker.offset:.0f})',
+          bar2.ticker.offset >= _o2)
 finally:
     usage.read_current_usage = orig_read
 

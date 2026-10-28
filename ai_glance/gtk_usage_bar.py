@@ -17,6 +17,7 @@ else (GTK, ``bar_segments``) runs on the GTK main thread via ``GLib.idle_add``.
 import contextlib
 import functools
 import threading
+import time
 from datetime import datetime, timezone
 
 import gi
@@ -85,34 +86,89 @@ def _style(widget, css):
     widget.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
 
-class _WrapFlow(Gtk.FlowBox):
-    """FlowBox whose plain height request is its height at the width it last got.
+TICKER_SPEED = 40  # px per second
+TICKER_GAP = 80    # px between the end of the line and its repeat
+TICKER_TICK_MS = 33
 
-    The bar sits in containers that ask for a constant size (EventBox, Terminator's
-    window wrapper); a stock FlowBox would then answer with its height at minimum
-    width (one cell per row). Instead: start as a single row, and whenever the
-    allocated width changes, re-request the height that width needs."""
 
-    def __init__(self):
-        Gtk.FlowBox.__init__(self)
-        self._width = None
+class _Ticker(Gtk.ScrolledWindow):
+    """A single line that scrolls left in an endless loop when it is wider than the
+    space it gets (like a news ticker); otherwise it stands still.
 
-    def do_get_request_mode(self):
-        return Gtk.SizeRequestMode.CONSTANT_SIZE
+    ``make_line()`` builds the line; it is built twice so the repeat can follow the
+    original seamlessly. The scrolled window never shows scrollbars and does not ask
+    for the line's width, so a long line never widens the Terminator window."""
 
-    def do_get_preferred_height(self):
-        width = self._width if self._width else 1 << 15  # unknown yet: one row
-        return Gtk.FlowBox.do_get_preferred_height_for_width(self, width)
+    def __init__(self, make_line, offset=0.0):
+        Gtk.ScrolledWindow.__init__(self)
+        self.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
+        self.set_shadow_type(Gtk.ShadowType.NONE)
+        self.first, self.second = make_line(), make_line()
+        self.gap = Gtk.Box()
+        self.gap.set_size_request(TICKER_GAP, -1)
+        strip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        for part in (self.first, self.gap, self.second):
+            strip.pack_start(part, False, False, 0)
+        for part in (self.gap, self.second):  # shown only while scrolling
+            part.set_no_show_all(True)
+        viewport = Gtk.Viewport()
+        viewport.set_shadow_type(Gtk.ShadowType.NONE)
+        _style(viewport, f'* {{ background-color: {BAR_BACKGROUND}; }}')
+        viewport.add(strip)
+        self.add(viewport)
+        self.offset = offset
+        self._timer = None
+        self._last = None
+        self._dead = False
+        self.connect('size-allocate', lambda *_: GLib.idle_add(self._update))
+        self.connect('destroy', self._on_destroy)
 
-    def do_size_allocate(self, allocation):
-        Gtk.FlowBox.do_size_allocate(self, allocation)
-        if allocation.width != self._width:
-            self._width = allocation.width
-            GLib.idle_add(self._requeue)
+    def _on_destroy(self, _widget):
+        self._dead = True
+        self._stop()
 
-    def _requeue(self):
-        self.queue_resize()
+    def scrolling(self):
+        return self._timer is not None
+
+    def _update(self):
+        if self._dead:
+            return False
+        try:
+            over = self.first.get_preferred_width()[1] > self.get_allocated_width() > 1
+            if over != self.second.get_visible():
+                for part in (self.gap, self.second):
+                    if over:
+                        part.show_all()
+                    else:
+                        part.hide()
+            if over and self._timer is None:
+                self._last = time.monotonic()
+                self._timer = GLib.timeout_add(TICKER_TICK_MS, self._step)
+            elif not over:
+                self._stop()
+                self.offset = 0.0
+                self.get_hadjustment().set_value(0)
+        except Exception as exc:  # never raise into GTK
+            dbg(f'ai-glance usage bar: ticker update failed: {exc!r}')
         return False
+
+    def _step(self):
+        try:
+            now = time.monotonic()
+            period = self.first.get_allocated_width() + TICKER_GAP
+            self.offset = (self.offset + TICKER_SPEED * (now - self._last)) % max(period, 1)
+            self._last = now
+            self.get_hadjustment().set_value(self.offset)
+            return True
+        except Exception as exc:
+            dbg(f'ai-glance usage bar: ticker step failed: {exc!r}')
+            self._timer = None
+            return False
+
+    def _stop(self):
+        if self._timer is not None:
+            GLib.source_remove(self._timer)
+            self._timer = None
 
 
 class _Bar:
@@ -126,6 +182,7 @@ class _Bar:
         self.box = Gtk.EventBox()
         self.content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.model = None
+        self.ticker = None
         self.wrapper = Gtk.VBox()
         self.dead = False
         self.generation = 0
@@ -218,6 +275,10 @@ class _Bar:
         self.box.set_tooltip_text(model.tooltip)
         for child in self.content.get_children():
             self.content.remove(child)
+        old, self.ticker = self.ticker, None
+        offset = old.offset if old is not None else 0.0
+        if old is not None:
+            old.destroy()  # stops its timer
         ctx = self.label.get_style_context()
         for cls in ('warning', 'error'):
             if cls == model.worst:
@@ -229,25 +290,11 @@ class _Bar:
             self.label.set_tooltip_text(model.tooltip)
             self.content.pack_start(self.label, True, True, 0)
         else:
-            # One line per account; inside a line the cells wrap onto more rows
-            # instead of forcing the window wider than the screen.
-            rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            for acc in model.accounts:
-                flow = _WrapFlow()
-                flow.set_selection_mode(Gtk.SelectionMode.NONE)
-                flow.set_homogeneous(False)
-                flow.set_max_children_per_line(64)
-                flow.set_column_spacing(10)
-                flow.set_row_spacing(2)
-                for cell in self._account_cells(acc):
-                    self._flow_add(flow, cell)
-                rows.pack_start(flow, False, False, 0)
-            rows.set_valign(Gtk.Align.CENTER)
-            self.content.pack_start(rows, True, True, 0)
+            # Everything on one line; if it is wider than the bar it scrolls in a loop.
+            self.ticker = _Ticker(lambda: self._line(model), offset)
+            self.content.pack_start(self.ticker, True, True, 0)
             if model.updated:
-                updated = self._text(model.updated, BAR_MUTED)
-                updated.set_valign(Gtk.Align.END)
-                self.content.pack_end(updated, False, False, 0)
+                self.content.pack_end(self._text(model.updated, BAR_MUTED), False, False, 0)
         self.content.show_all()
 
     @staticmethod
@@ -257,35 +304,32 @@ class _Bar:
         _style(label, f'* {{ color: {color}; {BAR_FONT} }}')
         return label
 
-    @staticmethod
-    def _flow_add(flow, widget):
-        flow.add(widget)
-        child = widget.get_parent()  # the Gtk.FlowBoxChild wrapper
-        child.set_can_focus(False)
-        _style(child, '* { padding: 0; }')
-
-    def _account_cells(self, acc):
-        """The account head (badge, plan, email) and one cell per limit window."""
-        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        head.set_tooltip_text(acc.tooltip)
-        badge = Gtk.Label(label=acc.provider_name)
-        badge.set_valign(Gtk.Align.CENTER)
-        _style(badge, '* { background-color: %s; color: %s; border-radius: 10px; padding: 0 8px;'
-                      ' font-weight: bold; font-size: 105%%; }' % (acc.badge_bg, acc.badge_fg))
-        head.pack_start(badge, False, False, 0)
-        muted = acc.kind + (f' \u00b7 {acc.who}' if acc.who else '')
-        head.pack_start(self._text(muted, BAR_MUTED), False, False, 0)
-        cells = [head]
-        for w in acc.windows:
-            cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            cell.set_tooltip_text(acc.tooltip)
-            cell.pack_start(self._text(w.short, BAR_FOREGROUND), False, False, 0)
-            cell.pack_start(_LevelBar(w.fraction, w.color), False, False, 0)
-            cell.pack_start(self._text(f'{w.percent}%', w.color), False, False, 0)
-            if w.reset:
-                cell.pack_start(self._text(w.reset, BAR_MUTED), False, False, 0)
-            cells.append(cell)
-        return cells
+    def _line(self, model):
+        """All accounts and their limit windows as one horizontal line."""
+        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        for i, acc in enumerate(model.accounts):
+            if i:
+                line.pack_start(self._text('\u2502', BAR_MUTED), False, False, 0)
+            head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            head.set_tooltip_text(acc.tooltip)
+            badge = Gtk.Label(label=acc.provider_name)
+            badge.set_valign(Gtk.Align.CENTER)
+            _style(badge, '* { background-color: %s; color: %s; border-radius: 10px; padding: 0 8px;'
+                          ' font-weight: bold; font-size: 105%%; }' % (acc.badge_bg, acc.badge_fg))
+            head.pack_start(badge, False, False, 0)
+            muted = acc.kind + (f' \u00b7 {acc.who}' if acc.who else '')
+            head.pack_start(self._text(muted, BAR_MUTED), False, False, 0)
+            line.pack_start(head, False, False, 0)
+            for w in acc.windows:
+                cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+                cell.set_tooltip_text(acc.tooltip)
+                cell.pack_start(self._text(w.short, BAR_FOREGROUND), False, False, 0)
+                cell.pack_start(_LevelBar(w.fraction, w.color), False, False, 0)
+                cell.pack_start(self._text(f'{w.percent}%', w.color), False, False, 0)
+                if w.reset:
+                    cell.pack_start(self._text(w.reset, BAR_MUTED), False, False, 0)
+                line.pack_start(cell, False, False, 0)
+        return line
 
 
 def _bar_of(window):
