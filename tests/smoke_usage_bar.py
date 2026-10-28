@@ -117,7 +117,10 @@ check('bar model matches bar_segments(read_usage())',
       f'{bar.model!r} != {expected!r}')
 check('real DB: at least one account group with a level bar',
       bool(expected) and any(isinstance(w, gtk_usage_bar._LevelBar) for w in descendants(bar.box)))
-check(f'bar is compact (<= 28 px): {bar.box.get_allocated_height()}', 0 < bar.box.get_allocated_height() <= 28)
+window.resize(1400, 600)
+pump(0.6)
+check(f'wide window: bar is one compact row (<= 28 px): {bar.box.get_allocated_height()}',
+      0 < bar.box.get_allocated_height() <= 28)
 _slot, _box = bar.slot.get_allocation(), bar.box.get_allocation()
 check(f'no gap between terminals and bar (slot ends {_slot.y + _slot.height}, bar starts {_box.y})',
       _box.y == _slot.y + _slot.height and _box.y + _box.height == bar.wrapper.get_allocated_height())
@@ -228,6 +231,34 @@ try:
     check('n/a gets error class', bar2.label.get_style_context().has_class('error'))
 finally:
     usage.DEFAULT_DB, usage.OMP_COMMAND = orig_db, orig_cmd
+
+# several accounts: every account is shown and the bar wraps instead of widening the window
+def _report(acc, email):
+    now_ms = int(time.time() * 1000)
+    return {'provider': 'anthropic', 'fetchedAt': now_ms,
+            'metadata': {'accountId': acc, 'email': email},
+            'limits': [{'label': label, 'status': 'ok', 'window': {'resetsAt': now_ms + 30 * 3600_000},
+                        'amount': {'usedFraction': 0.85}}
+                       for label in ('Claude 5 Hour', 'Claude 7 Day', 'Claude 7 Day (Fable)')]}
+
+
+_multi = usage.parse_omp_usage(
+    {'reports': [_report(f'a{i}', f'account{i}@example.com') for i in range(3)]}, {})
+orig_read = usage.read_current_usage
+try:
+    usage.read_current_usage = lambda *a, **k: _multi
+    window2.resize(800, 400)
+    bar2.in_flight = False
+    bar2._tick()
+    pump(1.0, lambda: bar2.model is not None and len(bar2.model.accounts) == 3)
+    whos = [a.who for a in bar2.model.accounts] if bar2.model else []
+    check(f'three accounts of one provider are all shown: {whos}',
+          whos == ['account0@', 'account1@', 'account2@'])
+    pump(0.5)
+    check(f'bar wraps instead of widening the window (width {window2.get_size()[0]})',
+          window2.get_size()[0] <= 900 and bar2.box.get_preferred_width()[0] <= 800)
+finally:
+    usage.read_current_usage = orig_read
 
 # destroy while a read is in flight
 orig_read = usage.read_current_usage
