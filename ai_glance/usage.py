@@ -152,8 +152,21 @@ def _window_text(w: UsageWindow, now: datetime) -> str:
         if w.resets_at <= now:
             text += ' reset'
         else:
-            text += f' resets {w.resets_at.astimezone().strftime("%H:%M")}'
+            local = w.resets_at.astimezone()
+            fmt = '%H:%M' if local.date() == now.astimezone().date() else '%a %H:%M'
+            text += f' resets {local.strftime(fmt)}'
     return text
+
+
+def _window_detail(w: UsageWindow, now: datetime) -> str:
+    """Tooltip line: usage plus the exact local reset time, whatever the severity."""
+    text = f'{w.short} {round(w.used_fraction * 100)}%'
+    if severity(w, now) == 'error':
+        text += ' \u26d4'
+    if w.resets_at is None:
+        return text + ' \u2014 no reset time'
+    when = w.resets_at.astimezone().strftime('%a %Y-%m-%d %H:%M')
+    return text + (f' \u2014 reset {when}' if w.resets_at <= now else f' \u2014 resets {when}')
 
 
 def _local_part(email: str) -> str:
@@ -170,17 +183,16 @@ def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
     plain_accounts: list[str] = []
     for acc in snap.accounts:
         mparts: list[str] = []
-        pparts: list[str] = []
         for w in acc.windows:
             sev = severity(w, now)
             if _RANK[sev] > _RANK[worst]:
                 worst = sev
             text = _window_text(w, now)
-            pparts.append(text)
             mparts.append(f'<span foreground="{_COLORS[sev]}">{escape(text)}</span>')
         name = _local_part(acc.email)
         markup_accounts.append(f'{escape(name)}  ' + ' \u00b7 '.join(mparts))
-        plain_accounts.append(f'{acc.email}  ' + ' \u00b7 '.join(pparts))
+        plain_accounts.append(acc.email + '\n' + '\n'.join(
+            '  ' + _window_detail(w, now) for w in acc.windows))
     suffix = ''
     if snap.updated_at is not None:
         mins = max(0, int((now - snap.updated_at).total_seconds() // 60))

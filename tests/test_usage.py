@@ -109,6 +109,31 @@ def test_reset_in_past(tmp_path):
     assert 'reset' in markup and 'resets' not in markup
 
 
+def test_reset_three_days_out_shows_weekday_and_date(tmp_path):
+    db = tmp_path / 'agent.db'
+    reset = NOW + timedelta(days=3)
+    make_db(db, [('acc-f', 'Claude 7 Day', NOW, 0.8, 'ok', reset),
+                 ('acc-f', 'Claude 5 Hour', NOW, 0.1, 'ok', NOW + timedelta(hours=1))])
+    markup, tip, _ = usage.format_bar(usage.read_usage(db), NOW)
+    local = reset.astimezone()
+    assert f'resets {local.strftime("%a %H:%M")}' in markup
+    assert tip.splitlines()[0] == 'frederik@example.com'
+    assert f'resets {local.strftime("%a %Y-%m-%d %H:%M")}' in tip
+    # below the warning threshold the bar stays terse but the tooltip is exact
+    assert '5h 10% resets' not in markup
+    assert f'5h 10% \u2014 resets {(NOW + timedelta(hours=1)).astimezone().strftime("%a %Y-%m-%d %H:%M")}' in tip
+
+
+def test_reset_today_has_no_weekday_in_bar(tmp_path):
+    db = tmp_path / 'agent.db'
+    now = datetime(2026, 10, 28, 8, 0, tzinfo=timezone.utc).astimezone().replace(hour=8, minute=0)
+    reset = now.replace(hour=9, minute=30)
+    make_db(db, [('acc-f', 'Claude 5 Hour', now, 1.0, 'exhausted', reset)])
+    markup, _, _ = usage.format_bar(usage.read_usage(db), now)
+    assert 'resets 09:30' in markup
+
+
+
 def test_email_escaped():
     w = usage.UsageWindow('Claude 5 Hour', '5h', 0.1, 'ok', None, NOW)
     snap = usage.UsageSnapshot((usage.AccountUsage('a<b&c@x.io', (w,)),), NOW, None)
