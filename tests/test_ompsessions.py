@@ -105,3 +105,80 @@ def test_pane_worktrees_in_use_stale_session(tmp_path):
     assert om.pane_worktrees_in_use(100, [Path('/w')], NOW, proc, sessions) == set()
     make_proc(proc, 101, '/dev/pts/7', ['bun', '/x/omp'])
     assert om.pane_worktrees_in_use(100, [Path('/w')], NOW, proc, sessions) == {Path('/w')}
+
+
+def title_first_log(path, n=40):
+    """Real omp layout: title on line 1, session record (cwd) on line 2."""
+    objs = [{'type': 'title', 'title': 'x'},
+            {'type': 'session', 'cwd': '/w/ws', 'timestamp': ts(timedelta(hours=3))}]
+    objs += [msg(ts(timedelta(minutes=5)), path=f'pad/{i}') for i in range(n)]
+    objs.append(msg(ts(timedelta(minutes=1)), path='.worktrees/v2/src/a.cpp'))
+    write_lines(path, objs)
+
+
+def test_relative_path_resolved_when_tail_cut_title_first(tmp_path):
+    log = tmp_path / 's.jsonl'
+    title_first_log(log)
+    got = om.recent_paths(log, NOW, tail_bytes=1500)
+    assert Path('/w/ws/.worktrees/v2/src/a.cpp') in got
+    assert Path('/w/ws/pad/0') not in got  # really cut
+
+
+def test_relative_path_falls_back_to_pts_cwd(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [{'type': 'title', 'title': 'x'},
+                      msg(ts(timedelta(minutes=1)), path='rel/a.py')])
+    assert om.recent_paths(log, NOW) == set()
+    assert om.recent_paths(log, NOW, base_cwd='/pts/cwd') == {Path('/pts/cwd/rel/a.py')}
+
+
+def test_subagent_uses_own_session_else_parent_cwd(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [{'type': 'session', 'cwd': '/parent', 'timestamp': ts(timedelta(hours=1))}])
+    sub_dir = tmp_path / 's'
+    write_lines(sub_dir / 'own.jsonl', [
+        {'type': 'session', 'cwd': '/own', 'timestamp': ts(timedelta(hours=1))},
+        msg(ts(timedelta(minutes=1)), path='x.py')])
+    write_lines(sub_dir / 'bare.jsonl', [msg(ts(timedelta(minutes=1)), path='y.py')])
+    got = om.recent_paths(log, NOW)
+    assert got == {Path('/own/x.py'), Path('/parent/y.py')}
+
+
+def test_semicolon_separated_paths_are_split(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [msg(ts(timedelta(minutes=1)), path='/a/b;rel/c; /d/e;;')])
+    assert om.recent_paths(log, NOW, base_cwd='/w') == {
+        Path('/a/b'), Path('/w/rel/c'), Path('/d/e')}
+
+
+def test_cache_is_bounded(tmp_path):
+    om._cache.clear()
+    for i in range(om._CACHE_MAX + 10):
+        log = tmp_path / f'{i}.jsonl'
+        write_lines(log, [msg(ts(timedelta(minutes=1)), path=f'/p/{i}')])
+        om.recent_paths(log, NOW)
+    assert len(om._cache) <= om._CACHE_MAX
+
+
+def test_parse_failure_is_reported_not_raised(tmp_path, monkeypatch):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [msg(ts(timedelta(minutes=1)), path='/p')])
+    om._cache.clear()
+
+    def boom(*a, **k):
+        raise ValueError('bad')
+
+    monkeypatch.setattr(om, '_parse_log', boom)
+    errors = []
+    assert om.recent_paths(log, NOW, errors=errors) == set()
+    assert [type(e) for e in errors] == [ValueError]
+
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    sessions = tmp_path / 'sess'
+    sessions.mkdir()
+    (sessions / 'pts-7').write_text(f'/w\n{log}\ncwdstat 1 2\n')
+    make_proc(proc, 100, '/dev/pts/7', ['bun', '/x/omp'])
+    errors = []
+    assert om.pane_worktrees_in_use(100, [Path('/p')], NOW, proc, sessions, errors) == set()
+    assert [type(e) for e in errors] == [ValueError]
