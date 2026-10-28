@@ -82,6 +82,28 @@ def test_repo_state_lists_worktrees_main_first(env):
     assert st.worktrees[1].ahead == 2
     assert st.worktrees[1].behind == 0
     assert repo_state(w1).worktrees[0].path == repo_a
+    assert repo_state(w1).current.path == w1
+    assert repo_state(repo_a).current.path == repo_a
+
+
+def test_current_is_deepest_containing_worktree(env):
+    _, _, repo_a, w1, _ = env
+    nested = w1 / "deep" / "dir"
+    nested.mkdir(parents=True)
+    assert repo_state(nested).current.path == w1
+    assert repo_state(repo_a).current.branch == "main"
+
+
+def test_worktree_workspace_repo_row_uses_linked_worktree(env):
+    _, ws, repo_a, w1, _ = env
+    wsw = ws / ".worktrees" / "w1"
+    (wsw / "build").mkdir()
+    m = build_model(wsw)
+    assert m.kind == "workspace" and m.path == wsw
+    assert [r.name for r in m.repos] == ["repo_a"]
+    assert m.repos[0].current.path == w1
+    assert m.repos[0].current.branch == "feat"
+    assert m.repos[0].worktrees[0].branch == "main"
 
 
 def test_dirty_flag(env):

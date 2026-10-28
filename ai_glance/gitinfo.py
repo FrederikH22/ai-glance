@@ -31,6 +31,7 @@ class RepoState:
     base: str | None
     worktrees: tuple[WorktreeState, ...]
     error: str | None
+    current: WorktreeState | None = None
 
 
 @dataclass(frozen=True)
@@ -183,9 +184,15 @@ def repo_state(repo_path: Path, timeout: float = 2.0) -> RepoState:
         root = Path(entries[0]["path"]).resolve()
         base = _base_ref(repo_path, timeout)
         worktrees = tuple(_worktree_state(e, base, timeout) for e in entries)
-        return RepoState(root, root.name, base, worktrees, None)
+        current = None
+        for wt in worktrees:
+            if (repo_path == wt.path or wt.path in repo_path.parents) and (
+                current is None or len(wt.path.parts) > len(current.path.parts)
+            ):
+                current = wt
+        return RepoState(root, root.name, base, worktrees, None, current)
     except Exception as exc:
-        return RepoState(repo_path, repo_path.name, None, (), _describe(exc))
+        return RepoState(repo_path, repo_path.name, None, (), _describe(exc), None)
 
 
 def build_model(cwd: Path, timeout: float = 2.0) -> PanelModel:
