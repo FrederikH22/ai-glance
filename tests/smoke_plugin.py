@@ -23,8 +23,11 @@ if Path(XDG).resolve() == (Path.home() / '.config').resolve():
     sys.exit('refusing to use the real config dir')
 
 HOME = Path.home()
-HW = HOME / 'ros_ws/src/robot_driver'
-WS = HOME / 'ros_ws'
+# A ROS workspace with git repos under src/ (some with linked worktrees) and one repo in it.
+WS = Path(os.path.expanduser(os.environ.get('AI_GLANCE_SMOKE_WS', '~/ros_ws')))
+HW = Path(os.path.expanduser(os.environ.get('AI_GLANCE_SMOKE_REPO', str(WS / 'src/robot_driver'))))
+if not HW.is_dir():
+    sys.exit(f'set AI_GLANCE_SMOKE_WS / AI_GLANCE_SMOKE_REPO: {HW} does not exist')
 SHOTS = os.environ.get('AI_GLANCE_SHOTS')
 
 # --- isolated config with the plugin installed -----------------------------
@@ -241,7 +244,7 @@ shot('accept-workspace-ros_ws.png')
 click_git(term)
 
 # 4b: a worktree workspace: repo rows must show that workspace's branches ------------
-WSW = WS / '.worktrees/v2-ws'
+WSW = Path(os.path.expanduser(os.environ.get('AI_GLANCE_SMOKE_WORKTREE_WS', str(WS / '.worktrees/v2-ws'))))
 if WSW.is_dir():
     check('4b: cd v2-ws', cd(term, WSW), term.get_cwd())
     click_git(term)

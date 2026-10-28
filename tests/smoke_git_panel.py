@@ -18,7 +18,10 @@ if 'XDG_CONFIG_HOME' not in os.environ:
 if not os.environ.get('DISPLAY'):
     sys.exit('refusing to run without a (virtual) DISPLAY')
 
-CWD = os.path.expanduser('~/ros_ws/src/robot_driver')
+# A git repo with linked worktrees; override with AI_GLANCE_SMOKE_REPO.
+CWD = os.path.expanduser(os.environ.get('AI_GLANCE_SMOKE_REPO', '~/ros_ws/src/robot_driver'))
+if not os.path.isdir(CWD):
+    sys.exit(f'set AI_GLANCE_SMOKE_REPO: {CWD} does not exist')
 os.chdir(CWD)
 
 import gi  # noqa: E402

@@ -45,6 +45,13 @@ Nothing is sent over the network.
 ## Tests
 
     python3 -m pytest tests -q
-    XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a python3 tests/smoke_git_panel.py
-    XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a python3 tests/smoke_usage_bar.py
-    XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a python3 tests/smoke_plugin.py   # needs an installed config copy, see file
+
+The GUI smokes need a real ROS workspace with git repos (some with linked
+worktrees) and run under Xvfb with an isolated config:
+
+    export AI_GLANCE_SMOKE_WS=~/ros_ws                       # workspace root
+    export AI_GLANCE_SMOKE_REPO=~/ros_ws/src/robot_driver    # a repo inside it
+    for s in tests/smoke_*.py; do XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a python3 "$s"; done
+
+`AI_GLANCE_SMOKE_WORKTREE_WS` optionally points at a worktree workspace
+(default `$AI_GLANCE_SMOKE_WS/.worktrees/v2-ws`; skipped if absent).
