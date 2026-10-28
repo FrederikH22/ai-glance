@@ -133,7 +133,7 @@ for _ in range(8):
     pump(0.2)
     samples.append(header(term_c))
 spread = max(max(s[i] for s in samples) - min(s[i] for s in samples) for i in range(3))
-check(f'input pane pulses (channel spread {spread} over 1.6 s)', spread >= 40)
+check(f'input pane pulses (channel spread {spread} over 1.6 s, period {st.PULSE_PERIOD} s)', spread >= 40)
 check('input pane is orange (red channel high, blue low)',
       all(s[0] >= 230 and s[2] <= 170 for s in samples), str(samples[:3]))
 if SHOTS:

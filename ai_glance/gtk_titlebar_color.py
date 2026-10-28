@@ -22,7 +22,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from terminatorlib.util import dbg  # noqa: E402
 
-PERIOD = 12.0
+PERIOD = 10.0
 SPREAD = 120.0
 SATURATION = 0.70
 VALUE = 0.62

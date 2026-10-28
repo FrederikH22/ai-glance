@@ -25,7 +25,7 @@ from . import gtk_titlebar_color, ompsessions  # noqa: E402
 
 POLL_SECONDS = 2
 PULSE_MS = 80
-PULSE_PERIOD = 1.6
+PULSE_PERIOD = 1.0
 WORKING_RGB = (0.66, 0.88, 0.64)      # pastel green  #a8e0a3
 INPUT_DIM_RGB = (1.00, 0.80, 0.55)    # light orange  #ffcc8c
 INPUT_BRIGHT_RGB = (1.00, 0.55, 0.10)  # strong orange #ff8c1a
