@@ -1,4 +1,4 @@
-"""Read Claude usage from omp's agent.db (read-only, GTK-free, thread-safe)."""
+"""Read AI-provider usage from omp's agent.db (read-only, GTK-free, thread-safe)."""
 from __future__ import annotations
 
 import sqlite3
@@ -10,30 +10,47 @@ from typing import Literal
 
 DEFAULT_DB = Path.home() / '.omp/agent/agent.db'
 
-WARNING_AT = 0.75
-ERROR_AT = 1.0
+WARNING_AT = 0.60
+ERROR_AT = 0.80
 BUSY_TIMEOUT_MS = 500
 
 Severity = Literal['normal', 'warning', 'error']
-_COLORS = {'normal': '#8ae234', 'warning': '#fcaf3e', 'error': '#ef2929'}
+_COLORS = {'normal': '#8ae234', 'warning': '#fce94f', 'error': '#ef2929'}
 _RANK = {'normal': 0, 'warning': 1, 'error': 2}
 
 _QUERY = """
-SELECT c.email, u.label, u.used_fraction, u.status, u.resets_at, u.recorded_at
+SELECT c.provider, c.kind, c.email, c.org,
+       u.label, u.used_fraction, u.status, u.resets_at, u.recorded_at
 FROM (
-    SELECT json_extract(data, '$.accountId') AS account_id,
-           json_extract(data, '$.email') AS email
+    SELECT provider, credential_type AS kind,
+           json_extract(data, '$.accountId') AS account_id,
+           json_extract(data, '$.email') AS email,
+           json_extract(data, '$.orgName') AS org
     FROM auth_credentials
-    WHERE provider = 'anthropic' AND disabled_cause IS NULL
+    WHERE disabled_cause IS NULL AND provider NOT LIKE 'mcp_oauth:%'
 ) AS c
-JOIN usage_history AS u ON u.account_id = c.account_id
-WHERE u.provider = 'anthropic'
-  AND u.recorded_at = (
+JOIN usage_history AS u ON u.provider = c.provider AND u.account_id = c.account_id
+WHERE u.recorded_at = (
       SELECT MAX(u2.recorded_at) FROM usage_history AS u2
-      WHERE u2.account_id = u.account_id AND u2.label = u.label
+      WHERE u2.provider = u.provider AND u2.account_id = u.account_id
+        AND u2.label = u.label
   )
-GROUP BY c.account_id, u.label
+GROUP BY c.provider, c.account_id, u.label
 """
+
+_PROVIDER_NAMES = {
+    'anthropic': 'Anthropic', 'openai': 'OpenAI', 'openai-codex': 'OpenAI',
+    'xai': 'xAI', 'cursor': 'Cursor', 'google': 'Google', 'gemini': 'Google',
+}
+_KIND_NAMES = {'oauth': 'subscription', 'api_key': 'API key', 'apikey': 'API key'}
+
+
+def provider_name(provider: str) -> str:
+    return _PROVIDER_NAMES.get(provider, provider.capitalize())
+
+
+def kind_name(kind: str) -> str:
+    return _KIND_NAMES.get(kind, kind)
 
 
 @dataclass(frozen=True)
@@ -50,6 +67,13 @@ class UsageWindow:
 class AccountUsage:
     email: str
     windows: tuple[UsageWindow, ...]
+    provider: str = 'anthropic'
+    kind: str = 'oauth'
+    org: str | None = None
+
+    @property
+    def title(self) -> str:
+        return f'{provider_name(self.provider)} {kind_name(self.kind)}'
 
 
 @dataclass(frozen=True)
@@ -61,8 +85,9 @@ class UsageSnapshot:
 
 def short_label(label: str) -> str:
     s = label.strip()
-    if s.startswith('Claude '):
-        s = s[len('Claude '):]
+    first, _, rest = s.partition(' ')
+    if first.isalpha() and rest[:1].isdigit():  # leading provider word: Claude, Codex, Grok
+        s = rest
     s = s.replace(' Hour', 'h').replace(' Day', 'd')
     parts = s.split(' ', 1)
     if len(parts) == 2 and parts[0][:-1].isdigit():
@@ -98,7 +123,7 @@ def _query(db_path: Path, mode: str) -> list[tuple]:
 
 
 def read_usage(db_path: Path = DEFAULT_DB) -> UsageSnapshot:
-    """Latest usage per enabled Anthropic account and window. Never raises."""
+    """Latest usage per enabled non-MCP account and window. Never raises."""
     try:
         db_path = Path(db_path)
         if not db_path.exists():
@@ -112,12 +137,13 @@ def read_usage(db_path: Path = DEFAULT_DB) -> UsageSnapshot:
             rows = _query(db_path, 'mode=ro')
         except sqlite3.Error:
             rows = _query(db_path, 'immutable=1')
-        by_email: dict[str, list[UsageWindow]] = {}
-        for email, label, frac, status, resets, rec in rows:
+        by_account: dict[tuple[str, str, str], tuple[str | None, list[UsageWindow]]] = {}
+        for provider, kind, email, org, label, frac, status, resets, rec in rows:
             recorded = _ms(rec)
             if recorded is None or label is None:
                 continue
-            by_email.setdefault(email or '?', []).append(UsageWindow(
+            key = (provider, email or '', kind or '')
+            by_account.setdefault(key, (org, []))[1].append(UsageWindow(
                 label=label,
                 short=short_label(label),
                 used_fraction=float(frac or 0.0),
@@ -126,8 +152,9 @@ def read_usage(db_path: Path = DEFAULT_DB) -> UsageSnapshot:
                 recorded_at=recorded,
             ))
         accounts = tuple(
-            AccountUsage(e, tuple(sorted(ws, key=_sort_key)))
-            for e, ws in sorted(by_email.items())
+            AccountUsage(e, tuple(sorted(ws, key=_sort_key)), p, k, org)
+            for (p, e, k), (org, ws) in sorted(
+                by_account.items(), key=lambda kv: (provider_name(kv[0][0]), kv[0][1], kv[0][2]))
         )
         times = [w.recorded_at for a in accounts for w in a.windows]
         return UsageSnapshot(accounts, max(times) if times else None, None)
@@ -170,13 +197,13 @@ def _window_detail(w: UsageWindow, now: datetime) -> str:
 
 
 def _local_part(email: str) -> str:
-    return email.split('@', 1)[0] + '@'
+    return email.split('@', 1)[0] + '@' if email else ''
 
 
 def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
     """Return (Pango markup, plain tooltip, worst severity)."""
     if snap.error is not None or not snap.accounts:
-        msg = snap.error or 'no enabled Claude accounts with usage data'
+        msg = snap.error or 'no enabled accounts with usage data'
         return 'Claude usage: n/a', msg, 'error'
     worst: Severity = 'normal'
     markup_accounts: list[str] = []
@@ -189,9 +216,13 @@ def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
                 worst = sev
             text = _window_text(w, now)
             mparts.append(f'<span foreground="{_COLORS[sev]}">{escape(text)}</span>')
-        name = _local_part(acc.email)
-        markup_accounts.append(f'{escape(name)}  ' + ' \u00b7 '.join(mparts))
-        plain_accounts.append(acc.email + '\n' + '\n'.join(
+        who = _local_part(acc.email)
+        head = acc.title + (f' \u00b7 {who}' if who else '')
+        markup_accounts.append(f'{escape(head)}  ' + ' \u00b7 '.join(mparts))
+        plain_head = acc.title + (f' \u00b7 {acc.email}' if acc.email else '')
+        if acc.org:
+            plain_head += f' \u00b7 {acc.org}'
+        plain_accounts.append(plain_head + '\n' + '\n'.join(
             '  ' + _window_detail(w, now) for w in acc.windows))
     suffix = ''
     if snap.updated_at is not None:

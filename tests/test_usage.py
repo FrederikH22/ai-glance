@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -25,16 +26,22 @@ def make_db(path, rows, accounts=None, wal=True):
         ' data TEXT, disabled_cause TEXT, identity_key TEXT, created_at INTEGER, updated_at INTEGER)')
     if accounts is None:
         accounts = [('acc-f', 'frederik@example.com', None)]
-    for acc_id, email, cause in accounts:
-        data = json.dumps({'accountId': acc_id, 'email': email, 'access': 'SECRET-TOKEN'})
+    for acc_id, email, cause, *extra in accounts:
+        provider, ctype, org = (extra + [None] * 3)[:3] if extra else (None, None, None)
+        data = {'accountId': acc_id, 'email': email, 'access': 'SECRET-TOKEN',
+                'refresh': 'SECRET-REFRESH', 'orgSecret': 'SECRET-ORG'}
+        if org:
+            data['orgName'] = org
         conn.execute(
             "INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause)"
-            " VALUES ('anthropic','oauth',?,?)", (data, cause))
-    for acc_id, label, rec, frac, status, resets in rows:
+            " VALUES (?,?,?,?)",
+            (provider or 'anthropic', ctype or 'oauth', json.dumps(data), cause))
+    for acc_id, label, rec, frac, status, resets, *prov in rows:
         conn.execute(
             "INSERT INTO usage_history (recorded_at, provider, account_id, label, used_fraction,"
-            " status, resets_at) VALUES (?, 'anthropic', ?, ?, ?, ?, ?)",
-            (ms(rec), acc_id, label, frac, status, resets and ms(resets)))
+            " status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ms(rec), prov[0] if prov else 'anthropic', acc_id, label, frac, status,
+             resets and ms(resets)))
     conn.commit()
     if wal:
         conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
@@ -80,6 +87,8 @@ def test_short_labels():
     assert usage.short_label('Claude 5 Hour') == '5h'
     assert usage.short_label('Claude 7 Day') == '7d'
     assert usage.short_label('Claude 7 Day (Fable)') == '7d Fable'
+    assert usage.short_label('Codex 5 Hour') == '5h'
+    assert usage.short_label('Grok 7 Day') == '7d'
 
 
 def test_format_bar_exhausted(tmp_path):
@@ -97,9 +106,66 @@ def test_format_bar_exhausted(tmp_path):
     assert usage.severity(w7, NOW) == 'normal'
 
 
-def test_warning_threshold():
-    w = usage.UsageWindow('Claude 7 Day', '7d', 0.8, 'ok', None, NOW)
-    assert usage.severity(w, NOW) == 'warning'
+def _plain(markup):
+    return re.sub(r'<[^>]+>', '', markup)
+
+
+def _sev_window(frac, status='ok'):
+    return usage.UsageWindow('Claude 7 Day', '7d', frac, status, None, NOW)
+
+
+def test_severity_thresholds_and_colours():
+    cases = [(0.59, 'ok', 'normal', '#8ae234'), (0.60, 'ok', 'warning', '#fce94f'),
+             (0.79, 'ok', 'warning', '#fce94f'), (0.80, 'ok', 'error', '#ef2929'),
+             (0.10, 'exhausted', 'error', '#ef2929')]
+    for frac, status, expected, colour in cases:
+        w = _sev_window(frac, status)
+        assert usage.severity(w, NOW) == expected, (frac, status)
+        snap = usage.UsageSnapshot((usage.AccountUsage('a@x.io', (w,)),), NOW, None)
+        markup, _, worst = usage.format_bar(snap, NOW)
+        assert f'foreground="{colour}"' in markup, (frac, status)
+        assert worst == expected
+
+
+def test_provider_and_kind_in_markup_and_tooltip(tmp_path):
+    db = tmp_path / 'agent.db'
+    make_db(db, [('acc-f', 'Claude 5 Hour', NOW, 0.09, 'ok', None)],
+            accounts=[('acc-f', 'frederik@example.com', None, 'anthropic', 'oauth', 'Acme GmbH')])
+    markup, tip, _ = usage.format_bar(usage.read_usage(db), NOW)
+    assert _plain(markup).startswith('Anthropic subscription \u00b7 frederik@  5h 9%')
+    assert tip.splitlines()[0] == \
+        'Anthropic subscription \u00b7 frederik@example.com \u00b7 Acme GmbH'
+    for secret in ('SECRET-TOKEN', 'SECRET-REFRESH', 'SECRET-ORG'):
+        assert secret not in markup and secret not in tip
+
+
+def test_other_providers_and_mcp_ignored(tmp_path):
+    db = tmp_path / 'agent.db'
+    t = NOW - timedelta(minutes=1)
+    make_db(db, [('acc-f', 'Claude 5 Hour', t, 0.1, 'ok', None),
+                 ('acc-o', 'Codex 5 Hour', t, 0.2, 'ok', None, 'openai'),
+                 ('acc-m', 'Claude 5 Hour', t, 0.3, 'ok', None, 'mcp_oauth:srv'),
+                 ('acc-n', 'Claude 5 Hour', t, 0.3, 'ok', None, 'xai')],
+            accounts=[('acc-f', 'frederik@example.com', None),
+                      ('acc-o', 'oli@example.com', None, 'openai', 'api_key'),
+                      ('acc-m', 'mcp@example.com', None, 'mcp_oauth:srv', 'oauth'),
+                      ('acc-x', 'norows@example.com', None, 'google', 'oauth')])
+    snap = usage.read_usage(db)
+    assert [(a.provider, a.kind) for a in snap.accounts] == [
+        ('anthropic', 'oauth'), ('openai', 'api_key')]
+    markup, tip, _ = usage.format_bar(snap, NOW)
+    assert 'OpenAI API key \u00b7 oli@  5h 20%' in _plain(markup)
+    assert 'mcp' not in markup and 'norows' not in markup and 'xAI' not in markup
+    assert 'OpenAI API key \u00b7 oli@example.com' in tip
+
+
+def test_provider_and_kind_names():
+    assert usage.provider_name('openai-codex') == 'OpenAI'
+    assert usage.provider_name('xai') == 'xAI'
+    assert usage.provider_name('gemini') == 'Google'
+    assert usage.provider_name('foo') == 'Foo'
+    assert usage.kind_name('apikey') == 'API key'
+    assert usage.kind_name('weird') == 'weird'
 
 
 def test_reset_in_past(tmp_path):
@@ -117,7 +183,7 @@ def test_reset_three_days_out_shows_weekday_and_date(tmp_path):
     markup, tip, _ = usage.format_bar(usage.read_usage(db), NOW)
     local = reset.astimezone()
     assert f'resets {local.strftime("%a %H:%M")}' in markup
-    assert tip.splitlines()[0] == 'frederik@example.com'
+    assert tip.splitlines()[0] == 'Anthropic subscription \u00b7 frederik@example.com'
     assert f'resets {local.strftime("%a %Y-%m-%d %H:%M")}' in tip
     # below the warning threshold the bar stays terse but the tooltip is exact
     assert '5h 10% resets' not in markup

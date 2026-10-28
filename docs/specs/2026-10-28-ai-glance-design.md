@@ -39,7 +39,7 @@ logged-in account is always visible at the bottom of each Terminator window.
 
 ## Non-goals
 
-- No Codex, Cursor or Grok/xAI usage (none are logged in; decided by Frederik).
+- Other providers' usage is shown only if omp has an enabled login with usage rows for them (amended by the user round).
 - No calls to Anthropic or any network API. No `git fetch`.
 - No git actions from the panel (no checkout, commit, push). Read-only display.
 - No changes to Terminator's packaged files under `/usr/lib/python3/dist-packages`.
@@ -211,11 +211,13 @@ logged-in account is always visible at the bottom of each Terminator window.
   no usage bar (logged via `dbg`), never an error (my call). Zoom/unzoom, new
   tabs, closing the last pane, layouts and drag-and-drop must still work
   (explicit acceptance tests below).
-- Accounts shown = omp's current logins: rows of `auth_credentials` with
-  `provider = 'anthropic'` and `disabled_cause IS NULL`, matched to
-  `usage_history.account_id` via `json_extract(data, '$.accountId')`. Only
-  `accountId`/`email` may be extracted from `data` (it holds OAuth tokens; never
-  read, log, or display anything else). As of writing this is only
+- Accounts shown = omp's current logins: every enabled (`disabled_cause IS NULL`)
+  `auth_credentials` row that is not an MCP credential (`provider NOT LIKE
+  'mcp_oauth:%'`) and has `usage_history` rows with the same `provider` and
+  `account_id = json_extract(data, '$.accountId')`; accounts without usage rows
+  are not shown. Ordered by provider name, then email. Only
+  `accountId`/`email`/`orgName` may be extracted from `data` (it holds OAuth tokens;
+  never read, log, or display anything else). As of writing this is only
   `you@example.com`; `colleague@` has `disabled_cause = 'deleted by user'`
   and must not be shown even though it still has `usage_history` rows.
 - Data: open `agent.db` read-only (`file:…?mode=ro` URI, short busy timeout).
@@ -223,12 +225,16 @@ logged-in account is always visible at the bottom of each Terminator window.
   once with `?immutable=1` (safe then, since no writer exists) (my call). For each
   `(account, label)` take the row with max `recorded_at`. Refresh every 30 s (my
   call) in a worker thread. Close the connection after each read.
-- Display, one segment per account, e.g.
-  `frederik@  5h 100% ⛔ resets 14:20 · 7d 17% · 7d Fable 0%   (updated 2 min ago)`;
+- Display, one segment per account, starting with the provider display name and
+  credential kind (`oauth` → `subscription`, `api_key`/`apikey` → `API key`, else the
+  raw value; `anthropic`→Anthropic, `openai`/`openai-codex`→OpenAI, `xai`→xAI,
+  `cursor`→Cursor, `google`/`gemini`→Google, else capitalised), e.g.
+  `Anthropic subscription · frederik@  5h 100% ⛔ resets 14:20 · 7d 17% · 7d Fable 0%   (updated 2 min ago)`;
   further accounts are appended with a `│` separator.
-  Colour per window: normal < 75 %, warning ≥ 75 %, error ≥ 100 % or
-  `status != 'ok'` (thresholds my call). Show the email local part; full email and
-  exact reset time in the tooltip. "updated N min ago" uses the newest
+  Usage colours (Frederik): normal/green `#8ae234` below 60 %, warning/yellow
+  `#fce94f` from 60 % up to 79 %, error/red `#ef2929` from 80 % or `status != 'ok'`.
+  The bar has an opaque `#000000` background. Show the email local part; provider,
+  kind, full email, `orgName` (if any) and exact reset time in the tooltip. "updated N min ago" uses the newest
   `recorded_at`, so stale data is visible when omp hasn't polled. If the DB is
   missing or unreadable: "Claude usage: n/a" with the reason in the tooltip.
 - A reset time already in the past is shown as "reset" (the limit has rolled over
