@@ -295,3 +295,89 @@ def test_severity_uses_displayed_percent():
         markup, _, _ = usage.format_bar(snap, NOW)
         assert pct in _plain(markup)
         assert usage.bar_segments(snap, NOW).accounts[0].windows[0].severity == sev
+
+
+def omp_payload(frac=0.37, fetched=NOW, email='frederik@example.com', account='acc-f'):
+    return {
+        'generatedAt': ms(fetched),
+        'reports': [{
+            'provider': 'anthropic', 'fetchedAt': ms(fetched),
+            'limits': [
+                {'label': 'Claude 5 Hour', 'status': 'ok',
+                 'window': {'resetsAt': ms(fetched + timedelta(hours=2))},
+                 'amount': {'usedFraction': frac}},
+                {'label': 'Claude 7 Day', 'status': 'ok',
+                 'window': {'resetsAt': ms(fetched + timedelta(days=5))},
+                 'amount': {'usedFraction': 0.23}},
+            ],
+            'metadata': {'accountId': account, 'email': email, 'orgName': 'Acme GmbH'},
+        }],
+    }
+
+
+def fake_omp(tmp_path, payload=None, exit_code=0, stdout=None):
+    """A command that prints ``payload`` as JSON and counts its runs."""
+    counter = tmp_path / 'runs'
+    out = stdout if stdout is not None else json.dumps(payload)
+    script = tmp_path / 'omp.py'
+    script.write_text(
+        'import pathlib, sys\n'
+        f'p = pathlib.Path({str(counter)!r}); p.write_text(str(int(p.read_text() or 0) + 1)'
+        ' if p.exists() else "1")\n'
+        f'sys.stdout.write({out!r})\n'
+        f'sys.exit({exit_code})\n')
+    return ('python3', str(script)), counter
+
+
+def test_parse_omp_usage_uses_live_values_and_credential_kind():
+    snap = usage.parse_omp_usage(omp_payload(), {('anthropic', 'acc-f'): 'api_key'})
+    assert snap.error is None and snap.updated_at == NOW
+    (acc,) = snap.accounts
+    assert (acc.email, acc.provider, acc.kind, acc.org) == (
+        'frederik@example.com', 'anthropic', 'api_key', 'Acme GmbH')
+    assert [(w.short, w.used_fraction) for w in acc.windows] == [('5h', 0.37), ('7d', 0.23)]
+    assert acc.windows[0].resets_at == NOW + timedelta(hours=2)
+
+
+def test_parse_omp_usage_without_limits_is_an_error():
+    assert usage.parse_omp_usage({'reports': []}, {}).error
+
+
+def test_live_usage_preferred_over_history(tmp_path):
+    db = tmp_path / 'agent.db'
+    make_db(db, [('acc-f', 'Claude 5 Hour', NOW - timedelta(minutes=50), 0.10, 'ok', None)])
+    cmd, _ = fake_omp(tmp_path, omp_payload(frac=0.42))
+    snap = usage.read_live_usage(db, cmd)
+    assert snap.accounts[0].windows[0].used_fraction == 0.42
+    assert snap.accounts[0].kind == 'oauth'  # from auth_credentials
+
+
+def test_live_usage_falls_back_to_history(tmp_path):
+    db = tmp_path / 'agent.db'
+    make_db(db, [('acc-f', 'Claude 5 Hour', NOW, 0.10, 'ok', None)])
+    for cmd, _ in (fake_omp(tmp_path, exit_code=1, stdout='boom'),
+                   fake_omp(tmp_path, stdout='not json'),
+                   (('/nonexistent/omp',), None)):
+        snap = usage.read_live_usage(db, cmd)
+        assert snap.error is None and snap.accounts[0].windows[0].used_fraction == 0.10
+    assert usage.read_live_usage(db, None).accounts[0].windows[0].used_fraction == 0.10
+
+
+def test_current_usage_shares_one_run_per_interval(tmp_path, monkeypatch):
+    db = tmp_path / 'agent.db'
+    make_db(db, [])
+    cmd, counter = fake_omp(tmp_path, omp_payload())
+    clock = [1000.0]
+    monkeypatch.setattr(usage.time, 'monotonic', lambda: clock[0])
+    usage._live_cache.clear()
+    first = usage.read_current_usage(db, cmd)
+    assert usage.read_current_usage(db, cmd) is first
+    assert counter.read_text() == '1'
+    clock[0] += usage.LIVE_MIN_INTERVAL_S
+    usage.read_current_usage(db, cmd)
+    assert counter.read_text() == '2'
+
+
+def test_bar_says_just_now_for_fresh_data():
+    snap = usage.parse_omp_usage(omp_payload(fetched=NOW), {})
+    assert usage.bar_segments(snap, NOW + timedelta(seconds=20)).updated == 'updated just now'

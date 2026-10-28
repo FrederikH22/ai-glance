@@ -9,8 +9,9 @@ in ``slot``; patched ``Window.add/remove/get_child`` keep every Terminator
 caller seeing it as the window's only child. ``get_children`` needs no patch:
 the original is ``[self.get_child()]``.
 
-Thread rules: ``usage.read_usage`` runs in a daemon thread; everything else
-(GTK, ``format_bar``) runs on the GTK main thread via ``GLib.idle_add``.
+Thread rules: ``usage.read_current_usage`` (runs ``omp usage --json``, shared
+by all windows, falls back to agent.db) runs in a daemon thread; everything
+else (GTK, ``bar_segments``) runs on the GTK main thread via ``GLib.idle_add``.
 """
 
 import contextlib
@@ -26,7 +27,7 @@ from terminatorlib.util import dbg  # noqa: E402
 
 from . import usage  # noqa: E402
 
-REFRESH_SECONDS = 30
+REFRESH_SECONDS = 60
 RERENDER_SECONDS = 60
 _ATTR = '_ai_glance_usage'
 _PATCHED = '_ai_glance_usage_patched'
@@ -154,7 +155,7 @@ class _Bar:
 
     def _read(self, generation):
         try:
-            snap = usage.read_usage(usage.DEFAULT_DB)
+            snap = usage.read_current_usage(usage.DEFAULT_DB, usage.OMP_COMMAND)
         except Exception as exc:  # read_usage should never raise; be safe
             snap = usage.UsageSnapshot((), None, f'{type(exc).__name__}: {exc}')
         GLib.idle_add(self._apply, generation, snap)

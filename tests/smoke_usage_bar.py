@@ -75,7 +75,8 @@ def bar_of(window):
 
 def expected_markup():
     """Accounts the bar must show (the 'updated N min ago' text changes with time)."""
-    return usage.bar_segments(usage.read_usage(usage.DEFAULT_DB), datetime.now(timezone.utc)).accounts
+    return usage.bar_segments(usage.read_current_usage(usage.DEFAULT_DB, usage.OMP_COMMAND),
+                              datetime.now(timezone.utc)).accounts
 
 
 def bar_text_matches(window, expected):
@@ -212,9 +213,10 @@ pump(0.5)
 bar2 = bar_of(window2)
 check('window created after install gets a bar', bar2 is not None
       and window2.get_child() is _term2)
-orig_db = usage.DEFAULT_DB
+orig_db, orig_cmd = usage.DEFAULT_DB, usage.OMP_COMMAND
 try:
     usage.DEFAULT_DB = Path('/nonexistent/ai-glance/agent.db')
+    usage.OMP_COMMAND = None  # no live omp either
     bar2.in_flight = False
     bar2._tick()
     check('missing DB shows "Claude usage: n/a"',
@@ -222,15 +224,15 @@ try:
           repr(bar2.label.get_label()))
     check('n/a gets error class', bar2.label.get_style_context().has_class('error'))
 finally:
-    usage.DEFAULT_DB = orig_db
+    usage.DEFAULT_DB, usage.OMP_COMMAND = orig_db, orig_cmd
 
 # destroy while a read is in flight
-orig_read = usage.read_usage
+orig_read = usage.read_current_usage
 try:
-    def slow_read(path):
+    def slow_read(path, command):
         time.sleep(0.6)
-        return orig_read(path)
-    usage.read_usage = slow_read
+        return orig_read(path, command)
+    usage.read_current_usage = slow_read
     window3, _term3 = terminator.new_window()
     pump(0.2)
     bar3 = bar_of(window3)
@@ -240,7 +242,7 @@ try:
     pump(1.2)
     check('destroy with read in flight: bar dead, no apply', bar3.dead and bar3.snapshot is None)
 finally:
-    usage.read_usage = orig_read
+    usage.read_current_usage = orig_read
 
 # screenshots for the report (AI_GLANCE_SHOTS=<dir>)
 shots = os.environ.get('AI_GLANCE_SHOTS')
