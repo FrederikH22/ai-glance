@@ -170,18 +170,24 @@ def severity(w: UsageWindow, now: datetime) -> Severity:
     return 'normal'
 
 
+def _reset_text(w: UsageWindow, now: datetime) -> str | None:
+    """Terse reset hint, only for warning/error windows with a known reset time."""
+    if severity(w, now) == 'normal' or w.resets_at is None:
+        return None
+    if w.resets_at <= now:
+        return 'reset'
+    local = w.resets_at.astimezone()
+    fmt = '%H:%M' if local.date() == now.astimezone().date() else '%a %H:%M'
+    return f'resets {local.strftime(fmt)}'
+
+
 def _window_text(w: UsageWindow, now: datetime) -> str:
     text = f'{w.short} {round(w.used_fraction * 100)}%'
-    sev = severity(w, now)
-    if sev == 'error':
+    if severity(w, now) == 'error':
         text += ' \u26d4'
-    if sev != 'normal' and w.resets_at is not None:
-        if w.resets_at <= now:
-            text += ' reset'
-        else:
-            local = w.resets_at.astimezone()
-            fmt = '%H:%M' if local.date() == now.astimezone().date() else '%a %H:%M'
-            text += f' resets {local.strftime(fmt)}'
+    reset = _reset_text(w, now)
+    if reset:
+        text += ' ' + reset
     return text
 
 
@@ -198,6 +204,13 @@ def _window_detail(w: UsageWindow, now: datetime) -> str:
 
 def _local_part(email: str) -> str:
     return email.split('@', 1)[0] + '@' if email else ''
+
+
+def _account_tooltip(acc: AccountUsage, now: datetime) -> str:
+    head = acc.title + (f' \u00b7 {acc.email}' if acc.email else '')
+    if acc.org:
+        head += f' \u00b7 {acc.org}'
+    return head + '\n' + '\n'.join('  ' + _window_detail(w, now) for w in acc.windows)
 
 
 def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
@@ -219,11 +232,7 @@ def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
         who = _local_part(acc.email)
         head = acc.title + (f' \u00b7 {who}' if who else '')
         markup_accounts.append(f'{escape(head)}  ' + ' \u00b7 '.join(mparts))
-        plain_head = acc.title + (f' \u00b7 {acc.email}' if acc.email else '')
-        if acc.org:
-            plain_head += f' \u00b7 {acc.org}'
-        plain_accounts.append(plain_head + '\n' + '\n'.join(
-            '  ' + _window_detail(w, now) for w in acc.windows))
+        plain_accounts.append(_account_tooltip(acc, now))
     suffix = ''
     if snap.updated_at is not None:
         mins = max(0, int((now - snap.updated_at).total_seconds() // 60))
@@ -232,3 +241,80 @@ def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
     markup = sep.join(markup_accounts) + escape(suffix)
     tooltip = '\n'.join(plain_accounts) + (('\n' + suffix.strip()) if suffix else '')
     return markup, tooltip, worst
+
+
+# --- graphical bar model -------------------------------------------------------
+
+# provider id -> (badge background, badge foreground)
+_BADGE_COLORS = {
+    'Anthropic': ('#d97757', '#ffffff'),
+    'OpenAI': ('#10a37f', '#ffffff'),
+    'xAI': ('#333333', '#ffffff'),
+}
+_BADGE_DEFAULT = ('#555555', '#ffffff')
+
+
+def badge_colors(provider: str) -> tuple[str, str]:
+    return _BADGE_COLORS.get(provider_name(provider), _BADGE_DEFAULT)
+
+
+def severity_color(sev: Severity) -> str:
+    return _COLORS[sev]
+
+
+@dataclass(frozen=True)
+class BarWindow:
+    short: str
+    fraction: float  # clamped to 0..1, for the level bar
+    percent: int
+    severity: Severity
+    color: str
+    reset: str | None
+
+
+@dataclass(frozen=True)
+class BarAccount:
+    provider_name: str
+    badge_bg: str
+    badge_fg: str
+    kind: str
+    who: str
+    tooltip: str
+    windows: tuple[BarWindow, ...]
+
+
+@dataclass(frozen=True)
+class BarModel:
+    """Everything the graphical bar draws; ``error`` set means show it as n/a."""
+    accounts: tuple[BarAccount, ...]
+    updated: str | None
+    tooltip: str
+    worst: Severity
+    error: str | None
+
+
+def bar_segments(snap: UsageSnapshot, now: datetime) -> BarModel:
+    if snap.error is not None or not snap.accounts:
+        msg = snap.error or 'no enabled accounts with usage data'
+        return BarModel((), None, msg, 'error', msg)
+    worst: Severity = 'normal'
+    accounts = []
+    for acc in snap.accounts:
+        windows = []
+        for w in acc.windows:
+            sev = severity(w, now)
+            if _RANK[sev] > _RANK[worst]:
+                worst = sev
+            windows.append(BarWindow(
+                w.short, min(1.0, max(0.0, w.used_fraction)), round(w.used_fraction * 100),
+                sev, _COLORS[sev], _reset_text(w, now)))
+        bg, fg = badge_colors(acc.provider)
+        accounts.append(BarAccount(
+            provider_name(acc.provider), bg, fg, kind_name(acc.kind), _local_part(acc.email),
+            _account_tooltip(acc, now), tuple(windows)))
+    updated = None
+    if snap.updated_at is not None:
+        mins = max(0, int((now - snap.updated_at).total_seconds() // 60))
+        updated = f'updated {mins} min ago'
+    tooltip = format_bar(snap, now)[1]
+    return BarModel(tuple(accounts), updated, tooltip, worst, None)

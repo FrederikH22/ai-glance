@@ -32,7 +32,49 @@ _ATTR = '_ai_glance_usage'
 _PATCHED = '_ai_glance_usage_patched'
 _OWNER = '_ai_glance_slot_owner'
 BAR_BACKGROUND = '#000000'
-BAR_FOREGROUND = '#d3d7cf'  # neutral text (email, "updated N min ago"), readable on black
+BAR_FOREGROUND = '#d3d7cf'  # neutral text, readable on black
+BAR_MUTED = '#8b949e'
+TRACK_COLOR = '#30363d'
+LEVEL_WIDTH, LEVEL_HEIGHT = 60, 6
+
+
+def _rgb(hex_color):
+    return tuple(int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+class _LevelBar(Gtk.DrawingArea):
+    """Small rounded horizontal level bar, filled to ``fraction`` in ``color``."""
+
+    def __init__(self, fraction, color):
+        Gtk.DrawingArea.__init__(self)
+        self.fraction, self.color = fraction, color
+        self.set_size_request(LEVEL_WIDTH, LEVEL_HEIGHT)
+        self.set_valign(Gtk.Align.CENTER)
+        self.connect('draw', self._draw)
+
+    def _draw(self, _widget, cr):
+        try:
+            import math
+            w, h = self.get_allocated_width(), self.get_allocated_height()
+            r = h / 2.0
+
+            def pill(width):
+                cr.new_sub_path()
+                cr.arc(r, r, r, math.pi / 2, 3 * math.pi / 2)
+                cr.arc(width - r, r, r, -math.pi / 2, math.pi / 2)
+                cr.close_path()
+
+            cr.set_source_rgb(*_rgb(TRACK_COLOR))
+            pill(w)
+            cr.fill()
+            fill = max(self.fraction * w, h if self.fraction > 0 else 0)
+            if fill > 0:
+                cr.set_source_rgb(*_rgb(self.color))
+                pill(min(fill, w))
+                cr.fill()
+        except Exception as exc:  # never raise into GTK
+            dbg(f'ai-glance usage bar: level draw failed: {exc!r}')
+        return False
 
 
 def _style(widget, css):
@@ -50,6 +92,8 @@ class _Bar:
         self.slot.__dict__[_OWNER] = window
         self.label = Gtk.Label()
         self.box = Gtk.EventBox()
+        self.content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.model = None
         self.wrapper = Gtk.VBox()
         self.dead = False
         self.generation = 0
@@ -58,25 +102,26 @@ class _Bar:
         self.sources = []
 
         self.label.set_xalign(0)
-        self.label.set_margin_start(6)
-        self.label.set_margin_end(6)
+        self.content.set_margin_start(6)
+        self.content.set_margin_end(6)
         self.label.set_ellipsize(3)  # Pango.EllipsizeMode.END
-        self.label.set_use_markup(True)
-        self.label.set_markup('Claude usage: \u2026')
-        self.label.set_margin_top(2)
-        self.label.set_margin_bottom(2)
+        self.label.set_text('Claude usage: \u2026')
         self.label.get_style_context().add_class('ai-glance-usage')
-        self.box.add(self.label)
+        self.content.set_margin_top(2)
+        self.content.set_margin_bottom(2)
+        self.content.pack_start(self.label, True, True, 0)
+        self.box.add(self.content)
         # Providers are attached to these two widgets only, never to the screen.
         self.box.get_style_context().add_class('ai-glance-usage-bar')
         _style(self.box, f'* {{ background-color: {BAR_BACKGROUND}; }}')
-        _style(self.label, f'* {{ color: {BAR_FOREGROUND}; }}')
+        _style(self.label, f'* {{ color: {BAR_MUTED}; font-size: 90%; }}')
         self.wrapper.pack_start(self.slot, True, True, 0)
         self.wrapper.pack_start(Gtk.Separator(), False, False, 0)
         self.wrapper.pack_start(self.box, False, False, 0)
         self.slot.show()
         self.wrapper.get_children()[1].show()
         self.label.show()
+        self.content.show()
         self.box.show()
         self.wrapper.show()
         self.wrapper.connect('destroy', self._on_destroy)
@@ -136,15 +181,63 @@ class _Bar:
     def _render(self):
         if self.snapshot is None:
             return
-        markup, tooltip, sev = usage.format_bar(self.snapshot, datetime.now(timezone.utc))
-        self.label.set_markup(markup)
-        self.label.set_tooltip_text(tooltip)
+        now = datetime.now(timezone.utc)
+        model = usage.bar_segments(self.snapshot, now)
+        self.model = model
+        self.box.set_tooltip_text(model.tooltip)
+        for child in self.content.get_children():
+            self.content.remove(child)
         ctx = self.label.get_style_context()
         for cls in ('warning', 'error'):
-            if cls == sev:
+            if cls == model.worst:
                 ctx.add_class(cls)
             else:
                 ctx.remove_class(cls)
+        if model.error is not None:
+            self.label.set_text('Claude usage: n/a')
+            self.label.set_tooltip_text(model.tooltip)
+            self.content.pack_start(self.label, True, True, 0)
+        else:
+            for i, acc in enumerate(model.accounts):
+                if i:
+                    sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+                    sep.set_margin_top(2)
+                    sep.set_margin_bottom(2)
+                    self.content.pack_start(sep, False, False, 0)
+                self.content.pack_start(self._account_group(acc), False, False, 0)
+            filler = Gtk.Box()
+            self.content.pack_start(filler, True, True, 0)
+            if model.updated:
+                self.content.pack_end(self._text(model.updated, BAR_MUTED), False, False, 0)
+        self.content.show_all()
+
+    @staticmethod
+    def _text(text, color, bold=False):
+        label = Gtk.Label(label=text)
+        label.set_valign(Gtk.Align.CENTER)
+        _style(label, '* { color: %s; font-size: 90%%;%s }' % (
+            color, ' font-weight: bold;' if bold else ''))
+        return label
+
+    def _account_group(self, acc):
+        group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        group.set_tooltip_text(acc.tooltip)
+        badge = Gtk.Label(label=acc.provider_name)
+        badge.set_valign(Gtk.Align.CENTER)
+        _style(badge, '* { background-color: %s; color: %s; border-radius: 9px; padding: 0 8px;'
+                      ' font-weight: bold; font-size: 85%%; }' % (acc.badge_bg, acc.badge_fg))
+        group.pack_start(badge, False, False, 0)
+        muted = acc.kind + (f' \u00b7 {acc.who}' if acc.who else '')
+        group.pack_start(self._text(muted, BAR_MUTED), False, False, 0)
+        for w in acc.windows:
+            cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            cell.pack_start(self._text(w.short, BAR_FOREGROUND), False, False, 0)
+            cell.pack_start(_LevelBar(w.fraction, w.color), False, False, 0)
+            cell.pack_start(self._text(f'{w.percent}%', w.color, bold=True), False, False, 0)
+            if w.reset:
+                cell.pack_start(self._text(w.reset, BAR_MUTED), False, False, 0)
+            group.pack_start(cell, False, False, 4)
+        return group
 
 
 def _bar_of(window):

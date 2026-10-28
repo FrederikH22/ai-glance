@@ -165,12 +165,11 @@ check('1: first pane cwd is robot_driver', term.get_cwd() == str(HW), term.get_c
 check('1: every pane has the git button at hbox index 0', all_buttons())
 check('7: usage bar at window bottom', bar_ok(window))
 bar = window.__dict__['_ai_glance_usage']
-expected = usage.format_bar(usage.read_usage(usage.DEFAULT_DB), __import__('datetime').datetime.now(
-    __import__('datetime').timezone.utc))[0]
-norm = lambda m: re.sub(r'updated \d+ min', 'updated N min', m)  # noqa: E731
-check('7: bar text matches usage_history',
-      pump(3.0, lambda: norm(bar.label.get_label()) == norm(expected)),
-      f'{bar.label.get_label()!r} vs {expected!r}')
+expected = usage.bar_segments(usage.read_usage(usage.DEFAULT_DB), __import__('datetime').datetime.now(
+    __import__('datetime').timezone.utc)).accounts
+check('7: bar model matches usage_history',
+      pump(3.0, lambda: bar.model is not None and bar.model.accounts == expected),
+      f'{bar.model!r} vs {expected!r}')
 
 # 2/3: click on robot_driver --------------------------------------------------
 model = gitinfo.build_model(HW)

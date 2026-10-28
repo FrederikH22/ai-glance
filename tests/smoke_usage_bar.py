@@ -62,21 +62,25 @@ def pump(seconds=0.2, until=None):
     return until() if until is not None else True
 
 
+def descendants(widget):
+    yield widget
+    if isinstance(widget, Gtk.Container):
+        for child in widget.get_children():
+            yield from descendants(child)
+
+
 def bar_of(window):
     return window.__dict__.get('_ai_glance_usage')
 
 
-def norm(markup):
-    return re.sub(r'updated \d+ min', 'updated N min', markup)
-
-
 def expected_markup():
-    return norm(usage.format_bar(usage.read_usage(usage.DEFAULT_DB), datetime.now(timezone.utc))[0])
+    """Accounts the bar must show (the 'updated N min ago' text changes with time)."""
+    return usage.bar_segments(usage.read_usage(usage.DEFAULT_DB), datetime.now(timezone.utc)).accounts
 
 
 def bar_text_matches(window, expected):
     bar = bar_of(window)
-    return bar is not None and norm(bar.label.get_label()) == expected
+    return bar is not None and bar.model is not None and bar.model.accounts == expected
 
 
 terminator = Terminator()
@@ -107,9 +111,15 @@ check('Factory isinstance Window still holds', maker.isinstance(window, 'Window'
 check('bar box is a wrapper child', bar.box.get_parent() is bar.wrapper)
 
 expected = expected_markup()
-check('bar text matches format_bar(read_usage())',
+check('bar model matches bar_segments(read_usage())',
       pump(2.0, lambda: bar_text_matches(window, expected)),
-      f'{bar.label.get_label()!r} != {expected!r}')
+      f'{bar.model!r} != {expected!r}')
+check('real DB: at least one account group with a level bar',
+      bool(expected) and any(isinstance(w, gtk_usage_bar._LevelBar) for w in descendants(bar.box)))
+check(f'bar is compact (<= 24 px): {bar.box.get_allocated_height()}', 0 < bar.box.get_allocated_height() <= 24)
+badge = [w for w in descendants(bar.box) if isinstance(w, Gtk.Label)
+         and w.get_text() == expected[0].provider_name]
+check('provider badge shows the provider name', len(badge) == 1)
 
 
 def fills_slot(win, b, tol=1):
@@ -137,7 +147,7 @@ pump(0.5)
 bg = bar.box.get_style_context().get_background_color(Gtk.StateFlags.NORMAL)
 check('bar box is visible and labelled', bar.box.get_visible() and bar.label.get_visible()
       and bar.box.get_style_context().has_class('ai-glance-usage-bar')
-      and bar.label.get_parent() is bar.box)
+      and bar.content.get_parent() is bar.box)
 check('bar box background is opaque #000000', (bg.red, bg.green, bg.blue, bg.alpha) == (0, 0, 0, 1),
       str(bg))
 check('bar box spans window width', abs(bar.box.get_allocation().width - bar.wrapper.get_allocation().width) <= 1
@@ -232,15 +242,18 @@ try:
 finally:
     usage.read_usage = orig_read
 
-# screenshot hook for the report
-shot = os.environ.get('AI_GLANCE_SHOT')
-if shot:
-    window2.resize(900, 300)
+# screenshots for the report (AI_GLANCE_SHOTS=<dir>)
+shots = os.environ.get('AI_GLANCE_SHOTS')
+if shots:
+    window2.resize(1280, 780)
+    bar2.in_flight = False
+    bar2._tick()
     window2.get_terminals()[0].emit('split-vert', None)
     pump(1.5, lambda: bar_text_matches(window2, expected))
     window2.show_all()
     pump(1.0)
-    os.system(f'import -window root {shot}')
+    os.system(f'import -window root {shots}/user-fullscreen.png')
+    os.system(f'import -window root -crop 1280x32+0+748 +repage {shots}/user-bar.png')
 
 for w in list(terminator.windows):
     w.emit('destroy')

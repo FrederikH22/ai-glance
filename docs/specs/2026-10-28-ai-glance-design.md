@@ -246,6 +246,15 @@ logged-in account is always visible at the bottom of each Terminator window.
   kind, full email, `orgName` (if any) and exact reset time in the tooltip. "updated N min ago" uses the newest
   `recorded_at`, so stale data is visible when omp hasn't polled. If the DB is
   missing or unreadable: "Claude usage: n/a" with the reason in the tooltip.
+- Visual design (user round, supersedes the text-only strip; `usage.bar_segments`
+  provides the data, `format_bar` stays for the tooltip): on the black bar each
+  account is a compact group: provider badge (rounded pill; Anthropic `#d97757`,
+  OpenAI `#10a37f`, xAI white on `#333`, others `#555`), muted kind and email local
+  part, then per window the short label, a 60×6 px rounded level bar filled to the
+  used fraction in the severity colour, the percentage in that colour and, for
+  warning/error windows, the muted reset text. Groups are separated by a thin
+  vertical rule; a muted `updated N min ago` sits right-aligned; height ≤ 24 px.
+  `n/a` is a muted `Claude usage: n/a` with the reason as tooltip.
 - A reset time already in the past is shown as "reset" (the limit has rolled over
   since omp last looked).
 

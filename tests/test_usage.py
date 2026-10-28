@@ -240,3 +240,40 @@ def test_no_side_files_created(tmp_path):
     snap = usage.read_usage(db)
     assert sorted(p.name for p in tmp_path.iterdir()) == before
     assert snap.accounts and snap.error is None
+
+
+def test_bar_segments_model(tmp_path):
+    db = tmp_path / 'agent.db'
+    t = NOW - timedelta(minutes=4)
+    make_db(db, [('acc-f', 'Claude 5 Hour', t, 0.85, 'ok', NOW + timedelta(hours=2)),
+                 ('acc-f', 'Claude 7 Day', t, 0.30, 'ok', NOW + timedelta(days=2)),
+                 ('acc-o', 'Codex 5 Hour', t, 0.65, 'ok', None, 'openai'),
+                 ('acc-x', 'Grok 5 Hour', t, 0.10, 'ok', None, 'xai')],
+            accounts=[('acc-f', 'frederik@example.com', None),
+                      ('acc-o', 'oli@example.com', None, 'openai', 'api_key'),
+                      ('acc-x', 'x@example.com', None, 'xai', 'oauth', 'XOrg')])
+    model = usage.bar_segments(usage.read_usage(db), NOW)
+    assert model.error is None and model.worst == 'error'
+    assert model.updated == 'updated 4 min ago'
+    names = [(a.provider_name, a.kind, a.who) for a in model.accounts]
+    assert names == [('Anthropic', 'subscription', 'frederik@'), ('OpenAI', 'API key', 'oli@'),
+                     ('xAI', 'subscription', 'x@')]
+    anth, oai, xai = model.accounts
+    assert (anth.badge_bg, anth.badge_fg) == ('#d97757', '#ffffff')
+    assert oai.badge_bg == '#10a37f'
+    assert (xai.badge_bg, xai.badge_fg) == ('#333333', '#ffffff')
+    w5, w7 = anth.windows
+    assert (w5.short, w5.percent, w5.severity, w5.color) == ('5h', 85, 'error', '#ef2929')
+    assert w5.fraction == 0.85 and w5.reset and w5.reset.startswith('resets')
+    assert (w7.severity, w7.color, w7.reset) == ('normal', '#8ae234', None)
+    assert oai.windows[0].severity == 'warning' and oai.windows[0].color == '#fce94f'
+    assert 'Anthropic subscription' in model.tooltip and 'XOrg' in anth.tooltip + xai.tooltip
+    assert 'SECRET' not in repr(model)
+
+
+def test_bar_segments_fraction_clamped_and_error():
+    w = usage.UsageWindow('Claude 5 Hour', '5h', 1.4, 'exhausted', None, NOW)
+    snap = usage.UsageSnapshot((usage.AccountUsage('a@x.io', (w,)),), NOW, None)
+    assert usage.bar_segments(snap, NOW).accounts[0].windows[0].fraction == 1.0
+    bad = usage.bar_segments(usage.UsageSnapshot((), None, 'agent.db not found'), NOW)
+    assert bad.error == 'agent.db not found' and bad.accounts == () and bad.tooltip == bad.error
