@@ -11,7 +11,8 @@ AVAILABLE = ['AiGlance']
 
 
 class AiGlance(plugin.Plugin):
-    """Git/worktree panel button on every pane, a usage bar on every window, animated active-pane colours."""
+    """Git/worktree panel button on every pane, a usage bar on every window,
+    animated active-pane colours and omp-state colours on unfocused panes."""
 
     capabilities = ['ai_glance']
 
@@ -33,3 +34,8 @@ class AiGlance(plugin.Plugin):
             gtk_titlebar_color.install()
         except Exception as exc:
             err('ai-glance: titlebar colour install failed: %r' % (exc,))
+        try:
+            from ai_glance import gtk_omp_state
+            gtk_omp_state.install()
+        except Exception as exc:
+            err('ai-glance: omp state colours install failed: %r' % (exc,))

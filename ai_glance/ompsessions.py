@@ -1,10 +1,12 @@
-"""Map a terminal pane to the worktrees its omp session recently touched.
+"""Map a terminal pane to its omp session: worktrees it recently touched and
+whether it is working or waiting for the user.
 
 GTK-free and thread-safe: called from worker threads.
 """
 import json
 import os
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -256,3 +258,86 @@ def pane_worktrees_in_use(shell_pid: Optional[int], worktrees: Iterable[Path], n
         if errors is not None:
             errors.append(exc)
         return set()
+
+
+# --- session state -------------------------------------------------------------
+
+WORKING = 'working'  # agent turn running, a tool in flight, or subagents still writing
+NEEDS_INPUT = 'input'  # turn ended (or an `ask` is open): omp waits for the user
+STATE_TAIL_BYTES = 64 * 1024
+SUBAGENT_ACTIVE_S = 20
+_SKIP_TYPES = {'title', 'title_change', 'credential_pin', 'model_change',
+               'thinking_level_change', 'model_usage'}
+_SKIP_CUSTOM = {'todo_hud_state', 'system-prompt-digest', 'user_todo_edit'}
+
+
+def _last_event(log: Path) -> Optional[dict]:
+    """Newest log line that says something about the turn (bookkeeping skipped)."""
+    with open(log, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - STATE_TAIL_BYTES))
+        lines = f.read().split(b'\n')
+    if size > STATE_TAIL_BYTES:
+        lines = lines[1:]  # first line may be cut
+    for raw in reversed(lines):
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue  # blank or half-written line
+        if not isinstance(event, dict) or event.get('type') in _SKIP_TYPES:
+            continue
+        if event.get('type') == 'custom' and event.get('customType') in _SKIP_CUSTOM:
+            continue
+        return event
+    return None
+
+
+def _subagents_active(log: Path, now: float) -> bool:
+    try:
+        return any(now - p.stat().st_mtime < SUBAGENT_ACTIVE_S
+                   for p in log.with_suffix('').glob('*.jsonl'))
+    except OSError:
+        return False
+
+
+def session_state(log: Path, now: Optional[float] = None) -> Optional[str]:
+    """WORKING, NEEDS_INPUT, or None (no events / session exited)."""
+    now = time.time() if now is None else now
+    event = _last_event(log)
+    if event is None:
+        return None
+    kind = event.get('type')
+    if kind == 'custom':
+        custom = event.get('customType')
+        if custom == 'session_exit':
+            return None
+        if custom == 'tool_execution_start':
+            tool = (event.get('data') or {}).get('toolName')
+            return NEEDS_INPUT if tool == 'ask' else WORKING
+    if kind == 'message':
+        msg = event.get('message') or {}
+        if msg.get('role') == 'assistant':
+            if msg.get('stopReason') == 'toolUse':
+                calls = [c.get('name') for c in msg.get('content') or []
+                         if isinstance(c, dict) and c.get('type') == 'toolCall']
+                return NEEDS_INPUT if 'ask' in calls else WORKING
+            # Turn over (stop/error/aborted): background subagents may still run.
+            return WORKING if _subagents_active(log, now) else NEEDS_INPUT
+    return WORKING  # user message, tool result, delivered job result: a turn is running
+
+
+def pane_omp_state(shell_pid: Optional[int], proc: Path = Path('/proc'),
+                   sessions_dir: Path = TERMINAL_SESSIONS,
+                   now: Optional[float] = None) -> Optional[str]:
+    """State of the omp running in this pane, or None (no live omp). Never raises."""
+    try:
+        tty = pane_tty(shell_pid, proc)
+        if tty is None or not omp_running_on_tty(tty, proc):
+            return None
+        log = session_log_for_tty(tty, sessions_dir)
+        if log is None or not log.exists():
+            return None
+        return session_state(log, now)
+    except Exception:  # noqa: BLE001 - contract: never raises
+        return None

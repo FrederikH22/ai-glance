@@ -182,3 +182,74 @@ def test_parse_failure_is_reported_not_raised(tmp_path, monkeypatch):
     errors = []
     assert om.pane_worktrees_in_use(100, [Path('/p')], NOW, proc, sessions, errors) == set()
     assert [type(e) for e in errors] == [ValueError]
+
+
+# --- session state -------------------------------------------------------------
+
+def assistant(stop, *tools):
+    content = [{'type': 'text', 'text': 'hi'}] + [{'type': 'toolCall', 'name': t} for t in tools]
+    return {'type': 'message', 'message': {'role': 'assistant', 'stopReason': stop,
+                                           'content': content}}
+
+
+def tool_start(name):
+    return {'type': 'custom', 'customType': 'tool_execution_start', 'data': {'toolName': name}}
+
+
+TITLE = {'type': 'title', 'title': 'x'}
+USER = {'type': 'message', 'message': {'role': 'user', 'content': [{'type': 'text'}]}}
+RESULT = {'type': 'message', 'message': {'role': 'toolResult', 'content': [{'type': 'text'}]}}
+
+
+def test_session_state_from_last_turn_event(tmp_path):
+    log = tmp_path / 's.jsonl'
+    cases = [
+        ([TITLE, USER], om.WORKING),                                   # model is thinking
+        ([TITLE, USER, assistant('toolUse', 'bash'), tool_start('bash')], om.WORKING),
+        ([TITLE, USER, assistant('toolUse', 'bash'), tool_start('bash'), RESULT], om.WORKING),
+        ([TITLE, USER, assistant('stop')], om.NEEDS_INPUT),            # turn over
+        ([TITLE, USER, assistant('error')], om.NEEDS_INPUT),
+        ([TITLE, USER, assistant('aborted')], om.NEEDS_INPUT),
+        ([TITLE, USER, assistant('toolUse', 'ask'), tool_start('ask')], om.NEEDS_INPUT),
+        ([TITLE, USER, assistant('stop'), {'type': 'title_change'},
+          {'type': 'custom', 'customType': 'todo_hud_state'}], om.NEEDS_INPUT),  # bookkeeping skipped
+        ([TITLE, USER, assistant('stop'), {'type': 'custom', 'customType': 'session_exit'}], None),
+        ([TITLE], None),
+    ]
+    for events, want in cases:
+        write_lines(log, events)
+        assert om.session_state(log, now=1e12) == want, events
+
+
+def test_turn_over_but_subagents_writing_counts_as_working(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [TITLE, USER, assistant('stop')])
+    sub = tmp_path / 's' / 'Worker.jsonl'
+    write_lines(sub, [USER])
+    now = sub.stat().st_mtime
+    assert om.session_state(log, now=now + 1) == om.WORKING
+    assert om.session_state(log, now=now + om.SUBAGENT_ACTIVE_S + 1) == om.NEEDS_INPUT
+
+
+def test_session_state_tail_cut_and_half_written_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(om, 'STATE_TAIL_BYTES', 300)
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [TITLE] + [RESULT] * 20 + [assistant('stop')])
+    with open(log, 'a') as f:
+        f.write('{"type": "message", "mess')  # being written right now
+    assert om.session_state(log, now=1e12) == om.NEEDS_INPUT
+
+
+def test_pane_omp_state_needs_live_omp(tmp_path):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    sessions = tmp_path / 'sess'
+    sessions.mkdir()
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [TITLE, USER, assistant('stop')])
+    (sessions / 'pts-7').write_text(f'/w\n{log}\ncwdstat 1 2\n')
+    make_proc(proc, 100, '/dev/pts/7', ['bash'])
+    assert om.pane_omp_state(100, proc, sessions) is None      # stale pts file, no omp
+    make_proc(proc, 101, '/dev/pts/7', ['bun', '/x/omp'])
+    assert om.pane_omp_state(100, proc, sessions, now=1e12) == om.NEEDS_INPUT
+    assert om.pane_omp_state(None, proc, sessions) is None

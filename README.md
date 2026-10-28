@@ -3,12 +3,18 @@
 A Terminator 2.1.3 plugin for working with AI coding agents (omp) across git worktrees.
 
 - **Git button** (⎇) at the far left of every pane's title bar. Click it to open a panel
-  inside that pane (no split) showing branch, ahead/behind vs `origin/main`, dirty flag and
-  all worktrees of the repo. In a directory that contains several repos (e.g. `~/ros_ws`) it
-  lists every repo under `src/` with its worktrees. Outside a repo: "Not a git repository".
-  Worktrees that an omp session running in that pane is working in are marked ◆.
-- **Usage bar** at the bottom of every window with the latest omp usage figures
-  ("n/a" when unavailable).
+  inside that pane (no split) showing the checked-out branch, ahead/behind vs
+  `origin/main` and uncommitted changes. In a ROS workspace root (e.g. `~/ros_ws`) it shows
+  one row per repo under `src/`. When omp runs in the pane, the worktrees that omp session
+  is working in are listed too (only those). Outside a repo: "Not a git repository".
+- **Usage bar** at the bottom of every window: provider, plan type and every limit window
+  with a level bar, green below 60 %, yellow 60–79 %, red from 80 %. Refreshed every
+  60 s ("n/a" when unavailable).
+- **Active pane**: animated colour gradient on its header and a 3 px frame in the same
+  gradient (stock colours while broadcasting).
+- **Unfocused panes running omp**: pastel green header while omp is working (turn running,
+  tool in flight, subagents still writing), pulsing orange while it waits for your input
+  (turn over or an `ask` open). Panes without omp keep the stock header.
 
 ## Install / uninstall
 
@@ -37,10 +43,11 @@ and restarting returns Terminator to stock behaviour.
 
 - `git` CLI (run in worker threads, never on the GTK main thread).
 - `~/.omp/agent/terminal-sessions` and the omp session logs, to find which worktrees an
-  omp process on a pane's tty is using.
-- `~/.omp/agent/agent.db`, opened **read-only**, for the usage figures.
+  omp process on a pane's tty is using and whether it is working or waiting for input.
+- `omp usage --json` for live usage limits (omp itself queries the provider), falling back
+  to the history in `~/.omp/agent/agent.db`, which is only ever opened **read-only**.
 
-Nothing is sent over the network.
+The plugin itself makes no network requests; only `omp usage` talks to the providers.
 
 ## Tests
 
