@@ -244,7 +244,8 @@ class _Bar:
 
     def _read(self, generation):
         try:
-            snap = usage.read_current_usage(usage.DEFAULT_DB, usage.OMP_COMMAND)
+            snap = usage.read_current_usage(usage.DEFAULT_DB, usage.OMP_COMMAND,
+                                            usage.OMP_INVALIDATE)
         except Exception as exc:  # read_usage should never raise; be safe
             snap = usage.UsageSnapshot((), None, f'{type(exc).__name__}: {exc}')
         GLib.idle_add(self._apply, generation, snap)

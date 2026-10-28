@@ -381,3 +381,20 @@ def test_current_usage_shares_one_run_per_interval(tmp_path, monkeypatch):
 def test_bar_says_just_now_for_fresh_data():
     snap = usage.parse_omp_usage(omp_payload(fetched=NOW), {})
     assert usage.bar_segments(snap, NOW + timedelta(seconds=20)).updated == 'updated just now'
+
+
+def test_live_usage_invalidates_omp_cache_first(tmp_path):
+    db = tmp_path / 'agent.db'
+    make_db(db, [])
+    log = tmp_path / 'order'
+    inval = tmp_path / 'inval.py'
+    inval.write_text(f'open({str(log)!r}, "a").write("invalidate\\n")\n')
+    fetch = tmp_path / 'fetch.py'
+    fetch.write_text(f'import sys\nopen({str(log)!r}, "a").write("fetch\\n")\n'
+                     f'sys.stdout.write({json.dumps(omp_payload(frac=0.5))!r})\n')
+    snap = usage.read_live_usage(db, ('python3', str(fetch)), ('python3', str(inval)))
+    assert log.read_text().split() == ['invalidate', 'fetch']
+    assert snap.accounts[0].windows[0].used_fraction == 0.5
+    # a failing invalidate still fetches (omp's cached report beats the hourly history)
+    snap = usage.read_live_usage(db, ('python3', str(fetch)), ('/nonexistent/omp',))
+    assert snap.accounts[0].windows[0].used_fraction == 0.5

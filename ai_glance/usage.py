@@ -18,6 +18,8 @@ from typing import Literal
 DEFAULT_DB = Path.home() / '.omp/agent/agent.db'
 # Live usage: omp fetches the provider limits itself. None disables it (history only).
 OMP_COMMAND: tuple[str, ...] | None = ('omp', 'usage', '--json', '--no-extensions')
+# omp caches usage reports for minutes; clear that cache so the fetch is really live.
+OMP_INVALIDATE: tuple[str, ...] | None = ('omp', 'usage', 'invalidate', '--no-extensions')
 LIVE_TIMEOUT_S = 20
 LIVE_MIN_INTERVAL_S = 50  # all bars share one fetch per interval
 
@@ -245,17 +247,27 @@ def _read_kinds(db_path: Path) -> dict[tuple[str, str], str]:
         return {}
 
 
+def _run(command: tuple[str, ...]) -> str:
+    argv, env = _resolve_command(command)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=LIVE_TIMEOUT_S,
+                          env=env, stdin=subprocess.DEVNULL, check=True).stdout
+
+
 def read_live_usage(db_path: Path = DEFAULT_DB,
-                    command: tuple[str, ...] | None = OMP_COMMAND) -> UsageSnapshot:
-    """Live limits from ``omp usage --json``; on any failure the latest
-    agent.db history (``read_usage``). Never raises."""
+                    command: tuple[str, ...] | None = OMP_COMMAND,
+                    invalidate: tuple[str, ...] | None = None) -> UsageSnapshot:
+    """Live limits from ``omp usage --json`` (after running ``invalidate``, if
+    given, so omp fetches fresh numbers instead of serving its cache); on any
+    failure the latest agent.db history (``read_usage``). Never raises."""
     if not command:
         return read_usage(db_path)
     try:
-        argv, env = _resolve_command(command)
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=LIVE_TIMEOUT_S,
-                              env=env, stdin=subprocess.DEVNULL, check=True)
-        snap = parse_omp_usage(json.loads(proc.stdout), _read_kinds(Path(db_path)))
+        if invalidate:
+            try:
+                _run(invalidate)
+            except Exception:  # noqa: BLE001 - a cached report is still better than none
+                pass
+        snap = parse_omp_usage(json.loads(_run(command)), _read_kinds(Path(db_path)))
         if snap.error is None:
             return snap
     except Exception:  # noqa: BLE001 - fall back to the recorded history
@@ -268,7 +280,8 @@ _live_cache: dict[tuple, tuple[float, UsageSnapshot]] = {}
 
 
 def read_current_usage(db_path: Path = DEFAULT_DB,
-                       command: tuple[str, ...] | None = OMP_COMMAND) -> UsageSnapshot:
+                       command: tuple[str, ...] | None = OMP_COMMAND,
+                       invalidate: tuple[str, ...] | None = None) -> UsageSnapshot:
     """``read_live_usage`` shared by every caller: at most one omp run per
     ``LIVE_MIN_INTERVAL_S`` for the same (db, command). Never raises."""
     key = (str(db_path), command)
@@ -276,7 +289,7 @@ def read_current_usage(db_path: Path = DEFAULT_DB,
         hit = _live_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < LIVE_MIN_INTERVAL_S:
             return hit[1]
-        snap = read_live_usage(db_path, command)
+        snap = read_live_usage(db_path, command, invalidate)
         _live_cache.clear()
         _live_cache[key] = (time.monotonic(), snap)
         return snap
