@@ -1,4 +1,4 @@
-# Terminator: per-pane git panel + Claude usage bar
+# ai-glance: Terminator plugin with per-pane git panel + Claude usage bar
 
 Date: 2026-10-28 · Owner: Frederik · Target: Terminator 2.1.3 (Ubuntu package, GTK 3.24, Python 3)
 
@@ -114,7 +114,7 @@ logged-in account is always visible at the bottom of each Terminator window.
 
 ### Components
 
-1. **`terminator_omp/` core package (no GTK imports).** Pure functions, unit
+1. **`ai_glance/` core package (no GTK imports).** Pure functions, unit
    tested:
    - `git_state(path) -> RepoState | None`: repo root, branch/detached SHA,
      ahead/behind vs base, dirty flag, list of `WorktreeState`.
@@ -123,11 +123,11 @@ logged-in account is always visible at the bottom of each Terminator window.
    - `pane_omp_paths(tty) -> set[Path]`: paths the omp in that tty touched
      recently (see "omp highlight").
    - `claude_usage(db_path) -> UsageSnapshot`: latest row per (account, label).
-2. **`omp_panel.py` plugin file.** Defines `AVAILABLE = ['OmpPanel']`, the
-   `OmpPanel(plugin.Plugin)` class, the monkeypatches, the GTK widgets, and the
+2. **`ai_glance_plugin.py` plugin file.** Defines `AVAILABLE = ['AiGlance']`, the
+   `AiGlance(plugin.Plugin)` class, the monkeypatches, the GTK widgets, and the
    background-thread scheduling. Thin layer over the core package.
-3. **Install.** Symlink `omp_panel.py` and `terminator_omp/` from the repo into
-   `~/.config/terminator/plugins/`, and add `OmpPanel` to `enabled_plugins` in
+3. **Install.** Symlink `ai_glance_plugin.py` and `ai_glance/` from the repo into
+   `~/.config/terminator/plugins/`, and add `AiGlance` to `enabled_plugins` in
    `~/.config/terminator/config` (keeping existing entries / defaults).
 
 ### Git button and panel
