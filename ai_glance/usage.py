@@ -199,5 +199,5 @@ def format_bar(snap: UsageSnapshot, now: datetime) -> tuple[str, str, Severity]:
         suffix = f'  (updated {mins} min ago)'
     sep = '  \u2502  '
     markup = sep.join(markup_accounts) + escape(suffix)
-    tooltip = '\n'.join(plain_accounts) + suffix
+    tooltip = '\n'.join(plain_accounts) + (('\n' + suffix.strip()) if suffix else '')
     return markup, tooltip, worst
