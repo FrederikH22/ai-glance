@@ -35,7 +35,8 @@ BAR_BACKGROUND = '#000000'
 BAR_FOREGROUND = '#d3d7cf'  # neutral text, readable on black
 BAR_MUTED = '#8b949e'
 TRACK_COLOR = '#30363d'
-LEVEL_WIDTH, LEVEL_HEIGHT = 60, 6
+LEVEL_WIDTH, LEVEL_HEIGHT = 64, 8
+BAR_FONT = 'font-size: 110%; font-weight: bold;'
 
 
 def _rgb(hex_color):
@@ -114,7 +115,7 @@ class _Bar:
         # Providers are attached to these two widgets only, never to the screen.
         self.box.get_style_context().add_class('ai-glance-usage-bar')
         _style(self.box, f'* {{ background-color: {BAR_BACKGROUND}; }}')
-        _style(self.label, f'* {{ color: {BAR_MUTED}; font-size: 90%; }}')
+        _style(self.label, f'* {{ color: {BAR_MUTED}; {BAR_FONT} }}')
         self.wrapper.pack_start(self.slot, True, True, 0)
         self.wrapper.pack_start(Gtk.Separator(), False, False, 0)
         self.wrapper.pack_start(self.box, False, False, 0)
@@ -212,11 +213,10 @@ class _Bar:
         self.content.show_all()
 
     @staticmethod
-    def _text(text, color, bold=False):
+    def _text(text, color):
         label = Gtk.Label(label=text)
         label.set_valign(Gtk.Align.CENTER)
-        _style(label, '* { color: %s; font-size: 90%%;%s }' % (
-            color, ' font-weight: bold;' if bold else ''))
+        _style(label, f'* {{ color: {color}; {BAR_FONT} }}')
         return label
 
     def _account_group(self, acc):
@@ -224,8 +224,8 @@ class _Bar:
         group.set_tooltip_text(acc.tooltip)
         badge = Gtk.Label(label=acc.provider_name)
         badge.set_valign(Gtk.Align.CENTER)
-        _style(badge, '* { background-color: %s; color: %s; border-radius: 9px; padding: 0 8px;'
-                      ' font-weight: bold; font-size: 85%%; }' % (acc.badge_bg, acc.badge_fg))
+        _style(badge, '* { background-color: %s; color: %s; border-radius: 10px; padding: 0 8px;'
+                      ' font-weight: bold; font-size: 105%%; }' % (acc.badge_bg, acc.badge_fg))
         group.pack_start(badge, False, False, 0)
         muted = acc.kind + (f' \u00b7 {acc.who}' if acc.who else '')
         group.pack_start(self._text(muted, BAR_MUTED), False, False, 0)
@@ -233,7 +233,7 @@ class _Bar:
             cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             cell.pack_start(self._text(w.short, BAR_FOREGROUND), False, False, 0)
             cell.pack_start(_LevelBar(w.fraction, w.color), False, False, 0)
-            cell.pack_start(self._text(f'{w.percent}%', w.color, bold=True), False, False, 0)
+            cell.pack_start(self._text(f'{w.percent}%', w.color), False, False, 0)
             if w.reset:
                 cell.pack_start(self._text(w.reset, BAR_MUTED), False, False, 0)
             group.pack_start(cell, False, False, 4)

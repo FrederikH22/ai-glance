@@ -116,7 +116,7 @@ check('bar model matches bar_segments(read_usage())',
       f'{bar.model!r} != {expected!r}')
 check('real DB: at least one account group with a level bar',
       bool(expected) and any(isinstance(w, gtk_usage_bar._LevelBar) for w in descendants(bar.box)))
-check(f'bar is compact (<= 24 px): {bar.box.get_allocated_height()}', 0 < bar.box.get_allocated_height() <= 24)
+check(f'bar is compact (<= 28 px): {bar.box.get_allocated_height()}', 0 < bar.box.get_allocated_height() <= 28)
 badge = [w for w in descendants(bar.box) if isinstance(w, Gtk.Label)
          and w.get_text() == expected[0].provider_name]
 check('provider badge shows the provider name', len(badge) == 1)
