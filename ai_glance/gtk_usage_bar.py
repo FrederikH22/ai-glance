@@ -19,7 +19,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from terminatorlib.util import dbg, err  # noqa: E402
+from terminatorlib.util import dbg  # noqa: E402
 
 from . import usage  # noqa: E402
 
@@ -97,7 +97,7 @@ class _Bar:
             self.snapshot = snap
             self._render()
         except Exception as exc:  # never raise into Terminator
-            err(f'ai-glance usage bar: apply failed: {exc!r}')
+            dbg(f'ai-glance usage bar: apply failed: {exc!r}')
         return False
 
     def _rerender(self):
@@ -106,7 +106,7 @@ class _Bar:
         try:
             self._render()
         except Exception as exc:
-            err(f'ai-glance usage bar: render failed: {exc!r}')
+            dbg(f'ai-glance usage bar: render failed: {exc!r}')
         return True
 
     def _render(self):
@@ -168,7 +168,7 @@ def _wrap(window, child=None):
             bar.slot.add(child)
         Gtk.Window.add(window, bar.wrapper)
     except Exception as exc:
-        err(f'ai-glance usage bar: cannot wrap window: {exc!r}')
+        dbg(f'ai-glance usage bar: cannot wrap window: {exc!r}')
         with contextlib.suppress(Exception):
             if child is not None and child in bar.slot.get_children():
                 bar.slot.remove(child)
@@ -264,7 +264,7 @@ def install():
                 try:
                     _rewrap_existing(window)
                 except Exception as exc:
-                    err(f'ai-glance usage bar: rewrap failed: {exc!r}')
+                    dbg(f'ai-glance usage bar: rewrap failed: {exc!r}')
         dbg('ai-glance usage bar installed')
     except Exception as exc:
-        err(f'ai-glance usage bar: install failed: {exc!r}')
+        dbg(f'ai-glance usage bar: install failed: {exc!r}')
