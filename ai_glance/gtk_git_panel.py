@@ -9,7 +9,7 @@ from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import GLib, Gtk, Gdk  # noqa: E402
+from gi.repository import GLib, Gtk, Gdk, Pango  # noqa: E402
 
 from terminatorlib.util import dbg  # noqa: E402
 
@@ -69,7 +69,7 @@ def _worktree_markup(wt, in_use):
 
 
 def _repo_markup(repo, show_base):
-    main = repo.worktrees[0] if repo.worktrees else None
+    main = repo.current or (repo.worktrees[0] if repo.worktrees else None)
     text = '<b>%s</b>' % _esc(repo.name)
     if repo.error or main is None:
         return text + '  ?'
@@ -89,13 +89,26 @@ def _repo_markup(repo, show_base):
     return text
 
 
+_logged_errors: set = set()
+
+
+def _log_once(exc):
+    name = type(exc).__name__
+    if name not in _logged_errors:
+        _logged_errors.add(name)
+        dbg('ai_glance git panel: omp session parse failed: %r' % (exc,))
+
+
 def _compute(cwd, pid):
     """Worker-thread computation. Returns (model, in_use) or None."""
     try:
         model = gitinfo.build_model(Path(cwd))
         paths = [wt.path for repo in model.repos for wt in repo.worktrees]
+        errors = []
         in_use = ompsessions.pane_worktrees_in_use(
-            pid, paths, datetime.now(timezone.utc))
+            pid, paths, datetime.now(timezone.utc), errors=errors)
+        for exc in errors:
+            _log_once(exc)
         return model, set(in_use)
     except Exception as exc:  # never raise into Terminator
         dbg('ai_glance git panel: refresh failed: %r' % (exc,))
@@ -232,7 +245,7 @@ class GitPanel(Gtk.Box):
         label = Gtk.Label(xalign=0)
         label.set_markup(markup)
         label.set_margin_start(indent)
-        label.set_ellipsize(3)  # Pango.EllipsizeMode.MIDDLE
+        label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self._style(label)
         self._content.pack_start(label, False, False, 0)
 
@@ -241,12 +254,13 @@ class GitPanel(Gtk.Box):
         key = (model, frozenset(in_use))
         if key == self._last_key:
             return
-        self._last_key = key
         if model is None:
             self._set_text('Git status: n/a')
+            self._last_key = key
             return
         if model.kind == 'none':
             self._set_text('Not a git repository: %s' % _short_path(model.path))
+            self._last_key = key
             return
         for child in self._content.get_children():
             self._content.remove(child)
@@ -272,6 +286,7 @@ class GitPanel(Gtk.Box):
                 self._add_markup(
                     _worktree_markup(wt, wt.path in in_use),
                     indent=16)
+        self._last_key = key
         self._content.show_all()
 
     def _update_max_height(self):
@@ -309,31 +324,64 @@ def toggle(terminal):
 
 # --- titlebar button -----------------------------------------------------
 
+def _sync_button_color(titlebar):
+    """Give the glyph the same foreground Titlebar.update gave the group label."""
+    try:
+        glyph = getattr(titlebar, _BUTTON_ATTR, None)
+        if glyph is None:
+            return
+        rgba = titlebar.grouplabel.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        glyph.override_color(Gtk.StateFlags.NORMAL, rgba)
+    except Exception as exc:
+        dbg('ai_glance git panel: button colour failed: %r' % (exc,))
+
+
 def _add_button(titlebar):
     try:
         hbox = titlebar.get_child()
-        if hbox is None:
+        if hbox is None or getattr(titlebar, _BUTTON_ATTR, None) is not None:
             return
-        if any(getattr(c, _BUTTON_ATTR, False) for c in hbox.get_children()):
-            return
-        button = Gtk.Button(label='⎇')
-        button.set_relief(Gtk.ReliefStyle.NONE)
-        button.set_focus_on_click(False)
-        button.set_can_focus(False)
-        button.set_tooltip_text('Git status')
-        setattr(button, _BUTTON_ATTR, True)
-        button.connect('clicked', lambda _b: toggle(titlebar.terminal))
-        hbox.pack_start(button, False, False, 0)
-        hbox.reorder_child(button, 0)
-        button.show()
+        # Same construction as the group icon (EventBox + label): a Gtk.Button
+        # would add theme padding and roughly double the title bar height.
+        glyph = Gtk.Label(label='⎇')
+        glyph.set_margin_start(4)
+        glyph.set_margin_end(4)
+        ebox = Gtk.EventBox()
+        ebox.set_visible_window(False)
+        ebox.add(glyph)
+        ebox.set_tooltip_text('Git status')
+        ebox.connect('button-press-event', lambda _w, ev: _on_button_press(titlebar, ev))
+        setattr(titlebar, _BUTTON_ATTR, glyph)
+        setattr(ebox, _BUTTON_ATTR, True)
+        hbox.pack_start(ebox, False, False, 0)
+        hbox.reorder_child(ebox, 0)
+        ebox.show_all()
+        _sync_button_color(titlebar)
     except Exception as exc:
         dbg('ai_glance git panel: button failed: %r' % (exc,))
+
+
+def _on_button_press(titlebar, event):
+    if event.button == 1:
+        toggle(titlebar.terminal)
+        return True
+    return False
 
 
 def install():
     """Patch Titlebar (idempotent) and retrofit existing terminals."""
     from terminatorlib.titlebar import Titlebar
     from terminatorlib.terminator import Terminator
+    if not getattr(Titlebar.update, _PATCH_ATTR, False):
+        original_update = Titlebar.update
+
+        def patched_update(self, *args, **kwargs):
+            result = original_update(self, *args, **kwargs)
+            _sync_button_color(self)
+            return result
+
+        setattr(patched_update, _PATCH_ATTR, True)
+        Titlebar.update = patched_update
     if not getattr(Titlebar.__init__, _PATCH_ATTR, False):
         original = Titlebar.__init__
 

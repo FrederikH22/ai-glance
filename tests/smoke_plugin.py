@@ -40,7 +40,8 @@ os.dup2(_errfile.fileno(), 2)
 
 import gi  # noqa: E402
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk  # noqa: E402
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk, Gtk  # noqa: E402
 
 # NOTE: ROOT is deliberately not on sys.path: ai_glance must come from the plugin dir.
 from terminatorlib.factory import Factory  # noqa: E402
@@ -118,12 +119,18 @@ from ai_glance import usage  # noqa: E402
 def button_ok(term):
     hbox = term.titlebar.get_child()
     first = hbox.get_children()[0]
-    return isinstance(first, Gtk.Button) and getattr(first, '_ai_glance_git_button', False)
+    return (isinstance(first, Gtk.EventBox) and not isinstance(first, Gtk.Button)
+            and getattr(first, '_ai_glance_git_button', False))
 
 
 def button_of(term):
     return term.titlebar.get_child().get_children()[0]
 
+
+def click_git(term):
+    ev = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+    ev.button = 1
+    button_of(term).emit('button-press-event', ev)
 
 def panels(term):
     return [c for c in term.get_children() if isinstance(c, GitPanel)]
@@ -161,7 +168,7 @@ check('7: bar text matches usage_history',
 model = gitinfo.build_model(HW)
 wt_paths = [wt.path for repo in model.repos for wt in repo.worktrees]
 paneds_before = sum(1 for w in descendants(window) if isinstance(w, Paned))
-button_of(term).clicked()
+click_git(term)
 check('2: click opens one panel inside the pane', len(panels(term)) == 1)
 panel = panels(term)[0]
 branch = model.repos[0].worktrees[0].branch
@@ -169,7 +176,7 @@ check('3: panel lists branch, base and every worktree',
       pump(8.0, lambda: branch in text_of(panel) and all(
           (str(p).replace(str(HOME), '~')) in text_of(panel) or p.name in text_of(panel)
           for p in wt_paths)) and 'origin/main' in text_of(panel), text_of(panel)[:400])
-check('3: worktree count matches model', len(wt_paths) >= 10, len(wt_paths))
+check('3: several worktrees listed (live repo state varies)', len(wt_paths) >= 2, len(wt_paths))
 check('2: no new split, vte still in the pane',
       sum(1 for w in descendants(window) if isinstance(w, Paned)) == paneds_before
       and term.vte in list(descendants(term)))
@@ -181,7 +188,7 @@ target = wt_paths[1]
 wt_branches = [wt.branch for repo in model.repos for wt in repo.worktrees]
 labels_before = [w.get_text() for w in descendants(panel) if isinstance(w, Gtk.Label)]
 real_fn = gtk_git_panel.ompsessions.pane_worktrees_in_use
-gtk_git_panel.ompsessions.pane_worktrees_in_use = lambda pid, paths, now: {target}
+gtk_git_panel.ompsessions.pane_worktrees_in_use = lambda pid, paths, now, **kw: {target}
 panel._last_key = None
 panel.refresh()
 pump(8.0, lambda: '◆' in text_of(panel) and not panel._in_flight)
@@ -200,13 +207,13 @@ panel.refresh()
 pump(8.0, lambda: '◆' not in text_of(panel) and not panel._in_flight)
 check('5: highlight gone again without omp', '◆' not in text_of(panel))
 
-button_of(term).clicked()
+click_git(term)
 check('2: second click removes the panel', not panels(term))
 check('2: panel closed cleanly', panel._closed and panel._timer is None)
 
 # 4: workspace view -------------------------------------------------------------
 check('4: cd ~/ros_ws', cd(term, WS), term.get_cwd())
-button_of(term).clicked()
+click_git(term)
 wsmodel = gitinfo.build_model(WS)
 repos = [r.name for r in wsmodel.repos]
 panel = panels(term)[0]
@@ -215,14 +222,33 @@ check('4: workspace view lists every repo under src/ with worktree rows',
       text_of(panel)[:400])
 check('4: repos found', len(repos) >= 3, repos)
 shot('accept-workspace-ros_ws.png')
-button_of(term).clicked()
+click_git(term)
+
+# 4b: a worktree workspace: repo rows must show that workspace's branches ------------
+WSW = WS / '.worktrees/v2-ws'
+if WSW.is_dir():
+    check('4b: cd v2-ws', cd(term, WSW), term.get_cwd())
+    click_git(term)
+    wmodel = gitinfo.build_model(WSW)
+    panel = panels(term)[0]
+    row_ok = lambda: all(  # noqa: E731
+        any(r.name in t and r.current.branch and r.current.branch in t
+            for t in [w.get_text() for w in descendants(panel) if isinstance(w, Gtk.Label)])
+        for r in wmodel.repos if r.current is not None and r.current.branch)
+    check('4b: repo rows show the worktree-workspace branches',
+          bool(wmodel.repos) and pump(10.0, lambda: 'workspace' in text_of(panel) and row_ok()),
+          [(r.name, r.current and r.current.branch) for r in wmodel.repos])
+    check('4b: current is not the main checkout for at least one repo',
+          any(r.current is not None and r.current is not r.worktrees[0] for r in wmodel.repos))
+    shot('accept-worktree-ws.png')
+    click_git(term)
 
 # 6: not a git repo -------------------------------------------------------------
 check('6: cd /tmp', cd(term, '/tmp'), term.get_cwd())
-button_of(term).clicked()
+click_git(term)
 panel = panels(term)[0]
 check('6: "Not a git repository"', pump(8.0, lambda: 'Not a git repository' in text_of(panel)), text_of(panel))
-button_of(term).clicked()
+click_git(term)
 cd(term, HW)
 
 # 7: split / zoom / tab / close ----------------------------------------------------
@@ -233,10 +259,10 @@ term2.emit('split-horiz', None)
 pump(1.0)
 check('7: split -> 3 panes, all with buttons', len(terminator.terminals) == 3 and all_buttons())
 check('7: bar survives split', bar_ok(window))
-button_of(term2).clicked()
+click_git(term2)
 pump(1.0)
 shot('accept-split-bar.png')
-button_of(term2).clicked()
+click_git(term2)
 before = window.get_child()
 window.zoom(term2)
 pump(0.5)

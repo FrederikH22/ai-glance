@@ -23,7 +23,7 @@ os.chdir(CWD)
 
 import gi  # noqa: E402
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib  # noqa: E402
+from gi.repository import Gtk, Gdk, GLib  # noqa: E402
 
 from terminatorlib.terminator import Terminator  # noqa: E402
 from terminatorlib.factory import Factory  # noqa: E402
@@ -77,7 +77,8 @@ def panel_of(term):
 def has_button(term):
     hbox = term.titlebar.get_child()
     first = hbox.get_children()[0]
-    return isinstance(first, Gtk.Button) and getattr(first, '_ai_glance_git_button', False)
+    return (isinstance(first, Gtk.EventBox) and not isinstance(first, Gtk.Button)
+            and getattr(first, '_ai_glance_git_button', False))
 
 
 terminator = Terminator()
@@ -96,10 +97,19 @@ try:
 except ImportError as exc:
     print('FAIL import ai_glance.gtk_git_panel: %s' % exc)
     sys.exit(1)
-
+h_before = term.titlebar.get_allocated_height()
 gtk_git_panel.install()
 gtk_git_panel.install()  # idempotent
+pump(0.5)
+h_after = term.titlebar.get_allocated_height()
 check('retrofit: existing terminal has git button first', has_button(term))
+check('titlebar height unchanged by the button ±2px (%s -> %s)' % (h_before, h_after),
+      h_before > 0 and abs(h_after - h_before) <= 2)
+_glyph = term.titlebar._ai_glance_git_button
+_fg = term.titlebar.grouplabel.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+_gfg = _glyph.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+check('glyph colour follows the titlebar foreground (%s vs %s)' % (_fg.to_string(), _gfg.to_string()),
+      _fg.to_string() == _gfg.to_string())
 check('install twice: exactly one button',
       sum(1 for c in term.titlebar.get_child().get_children()
           if getattr(c, '_ai_glance_git_button', False)) == 1)
