@@ -82,6 +82,14 @@ def text_of(widget):
     return '\n'.join(w.get_text() for w in descendants(widget) if isinstance(w, Gtk.Label))
 
 
+def omp_rows(panel):
+    return [w for w in descendants(panel) if w.get_style_context().has_class('gg-omp-row')]
+
+
+def label_texts(widget):
+    return [w.get_text() for w in descendants(widget) if isinstance(w, Gtk.Label)]
+
+
 def shot(name):
     if SHOTS:
         pump(0.5)
@@ -139,7 +147,7 @@ def panels(term):
 def bar_ok(win):
     bar = win.__dict__.get('_ai_glance_usage')
     return (bar is not None and Gtk.Bin.get_child(win) is bar.wrapper
-            and bar.wrapper.get_children()[-1] is bar.label)
+            and bar.wrapper.get_children()[-1] is bar.box)
 
 
 def all_buttons():
@@ -172,40 +180,42 @@ click_git(term)
 check('2: click opens one panel inside the pane', len(panels(term)) == 1)
 panel = panels(term)[0]
 branch = model.repos[0].worktrees[0].branch
-check('3: panel lists branch, base and every worktree',
-      pump(8.0, lambda: branch in text_of(panel) and all(
-          (str(p).replace(str(HOME), '~')) in text_of(panel) or p.name in text_of(panel)
-          for p in wt_paths)) and 'origin/main' in text_of(panel), text_of(panel)[:400])
-check('3: several worktrees listed (live repo state varies)', len(wt_paths) >= 2, len(wt_paths))
+check('3: panel lists the current branch and the base, no worktree list',
+      pump(8.0, lambda: branch in label_texts(panel) and 'origin/main' in text_of(panel)), text_of(panel)[:400])
+check('8: no omp -> no worktree rows and no omp badge',
+      not omp_rows(panel) and 'omp' not in label_texts(panel) and '◆' not in text_of(panel))
+check('3: several worktrees exist (live repo state varies)', len(wt_paths) >= 3, len(wt_paths))
 check('2: no new split, vte still in the pane',
       sum(1 for w in descendants(window) if isinstance(w, Paned)) == paneds_before
       and term.vte in list(descendants(term)))
-check('1/2: no omp here -> no highlight', '◆' not in text_of(panel))
 shot('accept-panel-robot_driver.png')
 
-# 5(b): highlight --------------------------------------------------------------
-target = wt_paths[1]
-wt_branches = [wt.branch for repo in model.repos for wt in repo.worktrees]
-labels_before = [w.get_text() for w in descendants(panel) if isinstance(w, Gtk.Label)]
+# 8: omp live in the pane -> exactly the in-use worktrees ---------------------------
+current_path = model.repos[0].current.path if model.repos[0].current else wt_paths[0]
+targets = [p for p in wt_paths if p != current_path][:2]
 real_fn = gtk_git_panel.ompsessions.pane_worktrees_in_use
-gtk_git_panel.ompsessions.pane_worktrees_in_use = lambda pid, paths, now, **kw: {target}
+gtk_git_panel.ompsessions.pane_worktrees_in_use = lambda pid, paths, now, **kw: set(targets)
 panel._last_key = None
 panel.refresh()
-pump(8.0, lambda: '◆' in text_of(panel) and not panel._in_flight)
-labels_after = [w.get_text() for w in descendants(panel) if isinstance(w, Gtk.Label)]
-diff = [i for i, (a, b) in enumerate(zip(labels_before, labels_after)) if a != b]
-check('5: exactly one row changed, only by the ◆ marker',
-      len(labels_before) == len(labels_after) and len(diff) == 1
-      and labels_after[diff[0]].replace('◆ ', '', 1) == labels_before[diff[0]], diff)
-check('5: that row is the in-use worktree (2nd worktree row, its branch)',
-      len(diff) == 1 and wt_branches[1] in labels_after[diff[0]]
-      and wt_branches[0] in labels_after[diff[0] - 1])
+pump(8.0, lambda: len(omp_rows(panel)) == 2 and not panel._in_flight)
+rows = omp_rows(panel)
+row_paths = {[l for l in label_texts(r)][0] for r in rows}
+short = lambda p: str(p).replace(str(HOME), '~')  # noqa: E731
+check('8: exactly the two in-use worktrees get rows (path, branch pill)',
+      len(rows) == 2 and row_paths == {short(p) for p in targets}, (row_paths, targets))
+check('8: omp badge in the header', 'omp' in label_texts(panel))
 shot('accept-highlight.png')
+if SHOTS:
+    pump(0.5)
+    subprocess.run(['import', '-window', 'root', str(Path(SHOTS) / 'user-git-panel-omp.png')], check=False)
 gtk_git_panel.ompsessions.pane_worktrees_in_use = real_fn
 panel._last_key = None
 panel.refresh()
-pump(8.0, lambda: '◆' not in text_of(panel) and not panel._in_flight)
-check('5: highlight gone again without omp', '◆' not in text_of(panel))
+pump(8.0, lambda: not omp_rows(panel) and not panel._in_flight)
+check('8: rows gone again without omp', not omp_rows(panel) and 'omp' not in label_texts(panel))
+if SHOTS:
+    pump(0.5)
+    subprocess.run(['import', '-window', 'root', str(Path(SHOTS) / 'user-git-panel.png')], check=False)
 
 click_git(term)
 check('2: second click removes the panel', not panels(term))
@@ -217,8 +227,8 @@ click_git(term)
 wsmodel = gitinfo.build_model(WS)
 repos = [r.name for r in wsmodel.repos]
 panel = panels(term)[0]
-check('4: workspace view lists every repo under src/ with worktree rows',
-      pump(10.0, lambda: 'workspace' in text_of(panel) and all(n in text_of(panel) for n in repos)),
+check('4: workspace view lists every repo under src/ (one row each)',
+      pump(10.0, lambda: 'GIT' in text_of(panel) and all(n in label_texts(panel) for n in repos)),
       text_of(panel)[:400])
 check('4: repos found', len(repos) >= 3, repos)
 shot('accept-workspace-ros_ws.png')
@@ -232,11 +242,10 @@ if WSW.is_dir():
     wmodel = gitinfo.build_model(WSW)
     panel = panels(term)[0]
     row_ok = lambda: all(  # noqa: E731
-        any(r.name in t and r.current.branch and r.current.branch in t
-            for t in [w.get_text() for w in descendants(panel) if isinstance(w, Gtk.Label)])
+        r.name in label_texts(panel) and r.current.branch in label_texts(panel)
         for r in wmodel.repos if r.current is not None and r.current.branch)
     check('4b: repo rows show the worktree-workspace branches',
-          bool(wmodel.repos) and pump(10.0, lambda: 'workspace' in text_of(panel) and row_ok()),
+          bool(wmodel.repos) and pump(10.0, lambda: 'GIT' in text_of(panel) and row_ok()),
           [(r.name, r.current and r.current.branch) for r in wmodel.repos])
     check('4b: current is not the main checkout for at least one repo',
           any(r.current is not None and r.current is not r.worktrees[0] for r in wmodel.repos))

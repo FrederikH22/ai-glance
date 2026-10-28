@@ -200,7 +200,7 @@ vpanels = panel_of(victim)
 vtext = labels_text(vpanels[0]) if vpanels else ''
 check('killed child: panel rendered n/a or real content',
       len(vpanels) == 1 and 'Loading' not in vtext and
-      ('n/a' in vtext or 'repo' in vtext or 'Not a git repository' in vtext))
+      ('n/a' in vtext or 'GIT' in vtext or 'Not a git repository' in vtext))
 pump(4)
 
 os.dup2(_real_stderr, 2)

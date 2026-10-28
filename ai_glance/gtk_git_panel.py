@@ -18,8 +18,6 @@ from . import gitinfo, ompsessions  # noqa: E402
 REFRESH_SECONDS = 3
 HEIGHT_FRACTION = 0.4
 MIN_MAX_HEIGHT = 80
-ACCENT = '#f5a623'
-GREY = '#888888'
 _PANEL_ATTR = '_ai_glance_git_panel'
 _BUTTON_ATTR = '_ai_glance_git_button'
 _PATCH_ATTR = '_ai_glance_git_patched'
@@ -39,54 +37,82 @@ def _short_path(path):
     return p
 
 
-def _worktree_markup(wt, in_use):
-    """Pango markup for one worktree row."""
+PANEL_CLASS = 'ai-glance-git'
+
+_CSS = """
+.ai-glance-git, .ai-glance-git scrolledwindow, .ai-glance-git viewport,
+.ai-glance-git .gg-content { background-color: #1e1f24; }
+.ai-glance-git .gg-content { padding: 8px; }
+.ai-glance-git label { color: #e6edf3; }
+.ai-glance-git .gg-muted { color: #8b949e; font-size: 80%; }
+.ai-glance-git .gg-header { letter-spacing: 1px; }
+.ai-glance-git .gg-glyph { color: #8b949e; }
+.ai-glance-git .gg-name { font-weight: bold; }
+.ai-glance-git .gg-repo { border-top: 1px solid #30363d; padding: 6px 0 2px 0; }
+.ai-glance-git .gg-repo.gg-first { border-top-width: 0; padding-top: 2px; }
+.ai-glance-git .gg-omp-row { border-left: 3px solid #8957e5; margin: 4px 0 0 14px; padding-left: 8px; }
+.ai-glance-git .gg-pill { background-color: #2d333b; border-radius: 9px; padding: 2px 8px;
+    font-family: monospace; font-size: 90%; }
+.ai-glance-git .gg-pill-detached { color: #d29922; }
+.ai-glance-git .gg-pill-muted { color: #8b949e; font-family: inherit; }
+.ai-glance-git .gg-badge { border-radius: 9px; padding: 1px 7px; font-size: 85%; font-weight: bold; }
+.ai-glance-git .gg-up { background-color: #2ea043; color: #ffffff; }
+.ai-glance-git .gg-down { background-color: #d29922; color: #1e1f24; }
+.ai-glance-git .gg-down-bad { background-color: #da3633; color: #ffffff; }
+.ai-glance-git .gg-omp-badge { background-color: #8957e5; color: #ffffff; border-radius: 9px;
+    padding: 1px 7px; font-size: 80%; font-weight: bold; }
+.ai-glance-git .gg-dirty { color: #d29922; }
+.ai-glance-git .gg-error { background-color: #da3633; color: #ffffff; }
+"""
+
+
+def _pill(text, *classes, tooltip=None):
+    label = Gtk.Label(label=text)
+    label.set_valign(Gtk.Align.CENTER)
+    ctx = label.get_style_context()
+    for cls in classes:
+        ctx.add_class(cls)
+    if tooltip:
+        label.set_tooltip_text(tooltip)
+    return label
+
+
+def _state_widgets(wt):
+    """Branch pill and ahead/behind/dirty/error badges for one worktree state."""
+    out = []
     if wt.branch:
-        branch = wt.branch
+        out.append(_pill(wt.branch, 'gg-pill'))
     else:
-        branch = 'detached @%s' % (wt.head or '')[:7]
-    parts = []
-    marker = '◆ ' if in_use else ''
-    parts.append(_esc(marker) + _esc(_short_path(wt.path)))
-    parts.append('<i>%s</i>' % _esc(branch))
-    if wt.prunable:
-        parts.append('(prunable)')
-    elif wt.error:
-        parts.append('?')
-    else:
-        if wt.ahead is not None and wt.behind is not None:
-            parts.append('↑%d ↓%d' % (wt.ahead, wt.behind))
-        if wt.dirty:
-            parts.append('●')
+        out.append(_pill('detached @%s' % (wt.head or '')[:7], 'gg-pill', 'gg-pill-detached'))
+    if wt.error:
+        out.append(_pill('?', 'gg-badge', 'gg-error', tooltip=str(wt.error)))
+    elif wt.prunable:
+        out.append(_pill('prunable', 'gg-pill', 'gg-pill-muted'))
+    elif wt.ahead is not None and wt.behind is not None:
+        if wt.ahead:
+            out.append(_pill('\u2191%d' % wt.ahead, 'gg-badge', 'gg-up'))
+        if wt.behind:
+            out.append(_pill('\u2193%d' % wt.behind, 'gg-badge',
+                             'gg-down-bad' if wt.behind > 10 else 'gg-down'))
+        if not wt.ahead and not wt.behind:
+            out.append(_pill('in sync', 'gg-pill', 'gg-pill-muted'))
+    if not wt.error and not wt.prunable and wt.dirty:
+        out.append(_pill('\u25cf', 'gg-dirty', tooltip='uncommitted changes'))
     if wt.locked:
-        parts.append('🔒')
-    text = '  '.join(parts)
-    if wt.prunable:
-        return '<span foreground="%s">%s</span>' % (GREY, text)
-    if in_use:
-        return '<span foreground="%s" weight="bold">%s</span>' % (ACCENT, text)
-    return text
+        out.append(_pill('\U0001f512', 'gg-muted', tooltip='locked'))
+    return out
 
 
-def _repo_markup(repo, show_base):
-    main = repo.current or (repo.worktrees[0] if repo.worktrees else None)
-    text = '<b>%s</b>' % _esc(repo.name)
-    if repo.error or main is None:
-        return text + '  ?'
-    if main.branch:
-        text += '  <i>%s</i>' % _esc(main.branch)
-    else:
-        text += '  <i>%s</i>' % _esc('detached @%s' % (main.head or '')[:7])
-    if not main.prunable and not main.error:
-        if main.ahead is not None and main.behind is not None:
-            text += '  ↑%d ↓%d' % (main.ahead, main.behind)
-        if main.dirty:
-            text += '  ●'
-    elif main.error:
-        text += '  ?'
-    if show_base and repo.base:
-        text += '  <span foreground="%s">vs %s</span>' % (GREY, _esc(repo.base))
-    return text
+def repo_rows(repo, in_use):
+    """Which states to show for ``repo``: (current, omp_worktrees, current_in_use).
+
+    Only the checkout the pane is in; additionally, when omp is live in the pane,
+    the in-use worktrees (never ``current`` twice).
+    """
+    current = repo.current or (repo.worktrees[0] if repo.worktrees else None)
+    current_path = current.path if current is not None else None
+    extra = [wt for wt in repo.worktrees if wt.path in in_use and wt.path != current_path]
+    return current, extra, current_path is not None and current_path in in_use
 
 
 _logged_errors: set = set()
@@ -127,38 +153,41 @@ class GitPanel(Gtk.Box):
         self._timer = None
 
         self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self._content.set_border_width(4)
+        self._content.get_style_context().add_class('gg-content')
         self._scroll = Gtk.ScrolledWindow()
         self._scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self._scroll.set_propagate_natural_height(True)
         self._scroll.add(self._content)
         self.pack_start(self._scroll, True, True, 0)
-        self.pack_end(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                      False, False, 0)
-        self._provider = None
         self._last_key = None
         self._close_id = None
-        self._apply_colors()
-        self._set_text('Loading…')
+        self._provider = None
+        self._apply_css()
+        self._set_text('Loading\u2026')
         self.connect('destroy', self._on_destroy)
 
-    def _apply_colors(self):
-        """Match the terminal's colours so text stays readable on any theme."""
+    def _apply_css(self):
+        """Dark card styling, scoped to this panel by its unique class (never global)."""
         try:
-            cfg = self._term.config
-            bg, fg = Gdk.RGBA(), Gdk.RGBA()
-            if not (bg.parse(cfg['background_color']) and fg.parse(cfg['foreground_color'])):
-                return
-            css = ('box, scrolledwindow, viewport, label { background-color: %s; color: %s; }'
-                   % (bg.to_string(), fg.to_string()))
+            self.get_style_context().add_class(PANEL_CLASS)
             provider = Gtk.CssProvider()
-            provider.load_from_data(css.encode())
+            provider.load_from_data(_CSS.encode())
             self.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-            for w in (self._scroll, self._content):
-                w.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             self._provider = provider
+            self._style_tree(self._scroll)
         except Exception as exc:
-            dbg('ai_glance git panel: colours skipped: %r' % (exc,))
+            dbg('ai_glance git panel: css skipped: %r' % (exc,))
+
+    def _style_tree(self, widget):
+        """GTK does not cascade a widget's provider to its children: attach it to each
+        widget of the subtree (selectors are all scoped under ``.ai-glance-git``)."""
+        if self._provider is None:
+            return
+        widget.get_style_context().add_provider(
+            self._provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        if isinstance(widget, Gtk.Container):
+            for child in widget.get_children():
+                self._style_tree(child)
 
     # lifecycle ---------------------------------------------------------
     def start(self):
@@ -228,26 +257,67 @@ class GitPanel(Gtk.Box):
         return False
 
     # rendering ---------------------------------------------------------
-    def _set_text(self, text):
+    def _clear(self):
         for child in self._content.get_children():
             self._content.remove(child)
+
+    def _set_text(self, text):
+        self._clear()
         label = Gtk.Label(label=text, xalign=0)
-        self._style(label)
         self._content.pack_start(label, False, False, 0)
+        self._style_tree(self._content)
         self._content.show_all()
 
-    def _style(self, label):
-        if self._provider is not None:
-            label.get_style_context().add_provider(
-                self._provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    def _header(self, base_text, omp_live, tooltip):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        label = Gtk.Label(label=base_text, xalign=0)
+        label.get_style_context().add_class('gg-muted')
+        label.get_style_context().add_class('gg-header')
+        label.set_tooltip_text(tooltip)
+        box.pack_start(label, False, False, 0)
+        if omp_live:
+            box.pack_start(_pill('omp', 'gg-omp-badge', tooltip='omp is running in this pane'),
+                           False, False, 0)
+        return box
 
-    def _add_markup(self, markup, indent=0):
-        label = Gtk.Label(xalign=0)
-        label.set_markup(markup)
-        label.set_margin_start(indent)
-        label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        self._style(label)
-        self._content.pack_start(label, False, False, 0)
+    def _repo_card(self, repo, in_use, first, show_base):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        ctx = card.get_style_context()
+        ctx.add_class('gg-repo')
+        if first:
+            ctx.add_class('gg-first')
+        current, extra, current_in_use = repo_rows(repo, in_use)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        glyph = _pill('\u2387', 'gg-glyph')
+        name = _pill(repo.name, 'gg-name')
+        name.set_xalign(0)
+        row.pack_start(glyph, False, False, 0)
+        row.pack_start(name, False, False, 0)
+        if repo.error or current is None:
+            row.pack_start(_pill('?', 'gg-badge', 'gg-error', tooltip=str(repo.error or 'no checkout')),
+                           False, False, 0)
+        else:
+            if current_in_use:
+                row.pack_start(_pill('omp', 'gg-omp-badge', tooltip='omp works in this checkout'),
+                               False, False, 0)
+            for w in _state_widgets(current):
+                row.pack_start(w, False, False, 0)
+        if show_base and repo.base:
+            row.pack_start(_pill('vs %s' % repo.base, 'gg-muted'), False, False, 0)
+        row.set_tooltip_text(_short_path(current.path if current is not None else repo.root))
+        card.pack_start(row, False, False, 0)
+        for wt in extra:
+            line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            line.get_style_context().add_class('gg-omp-row')
+            path = Gtk.Label(label=_short_path(wt.path), xalign=0)
+            path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            path.get_style_context().add_class('gg-muted')
+            line.pack_start(path, False, False, 0)
+            for w in _state_widgets(wt):
+                line.pack_start(w, False, False, 0)
+            line.set_tooltip_text(str(wt.path))
+            card.pack_start(line, False, False, 0)
+        return card
 
     def _render(self, model, in_use):
         self._update_max_height()
@@ -262,31 +332,30 @@ class GitPanel(Gtk.Box):
             self._set_text('Not a git repository: %s' % _short_path(model.path))
             self._last_key = key
             return
-        for child in self._content.get_children():
-            self._content.remove(child)
+        self._clear()
         bases = {r.base for r in model.repos}
         real_bases = {b for b in bases if b}
         if len(real_bases) == 1 and None not in bases:
-            base_text = 'vs %s' % next(iter(real_bases))
+            base_text = 'GIT \u00b7 vs %s' % next(iter(real_bases))
             show_base = False
         elif not real_bases:
-            base_text = 'no base ref'
+            base_text = 'GIT \u00b7 no base ref'
             show_base = False
         else:
-            base_text = 'per-repo base'
+            base_text = 'GIT \u00b7 per-repo base'
             show_base = True
         kind = 'workspace' if model.kind == 'workspace' else 'repo'
-        self._add_markup('<span foreground="%s">%s %s — %s</span>' % (
-            GREY, _esc(kind), _esc(_short_path(model.path)), _esc(base_text)))
+        self._content.pack_start(
+            self._header(base_text, bool(in_use), '%s %s' % (kind, _short_path(model.path))),
+            False, False, 0)
         if not model.repos:
-            self._add_markup('no git repositories found')
-        for repo in model.repos:
-            self._add_markup(_repo_markup(repo, show_base))
-            for wt in repo.worktrees:
-                self._add_markup(
-                    _worktree_markup(wt, wt.path in in_use),
-                    indent=16)
+            self._content.pack_start(Gtk.Label(label='no git repositories found', xalign=0),
+                                     False, False, 0)
+        for i, repo in enumerate(model.repos):
+            self._content.pack_start(self._repo_card(repo, in_use, i == 0, show_base),
+                                     False, False, 0)
         self._last_key = key
+        self._style_tree(self._content)
         self._content.show_all()
 
     def _update_max_height(self):

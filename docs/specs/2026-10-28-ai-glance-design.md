@@ -27,10 +27,13 @@ logged-in account is always visible at the bottom of each Terminator window.
    and whether there are uncommitted changes.
 4. **Panel content, ROS workspace root.** When the cwd is the root of a ROS
    workspace, show the same for every git repo under `src/` (one row per repo).
-5. **Worktrees.** Under each repo, list all of its worktrees (`git worktree list`)
-   with path, branch, ahead/behind main, dirty flag.
-6. **omp highlight.** Highlight the worktrees that *the omp running in this pane*
-   is currently using. All worktrees are listed; only the in-use ones are marked.
+5. **Current checkout only.** (Amended by the user round: the panel no longer lists
+   all worktrees.) Per repo the panel shows only the checkout the pane is in, with
+   branch, ahead/behind main and dirty flag.
+6. **omp worktrees.** When an omp is live in this pane, additionally and ONLY the
+   worktrees that omp is currently using are listed under their repo, marked as
+   omp-in-use (a worktree equal to the current checkout is not listed twice; the
+   repo row gets the omp badge instead).
 7. **Claude usage bar.** A strip along the bottom of each Terminator window,
    independent of how the window is split into panes, showing the Claude usage of
    every account omp is logged into: per account, each limit window (5 Hour, 7 Day,
@@ -160,10 +163,16 @@ logged-in account is always visible at the bottom of each Terminator window.
   `~/ros_ws/src`): workspace view of the nearest ancestor workspace root (my call).
 - Otherwise: "Not a git repository: <cwd>".
 - Per repo row: name (dir name), branch, `↑ahead ↓behind` vs base, dirty marker.
-- Under each repo: its worktrees from `git worktree list --porcelain` (main
-  worktree first), each with short path (relative to `$HOME` → `~/…`), branch,
-  ahead/behind vs base, dirty marker. Highlighted rows (see below) are bold with a
-  marker and accent colour.
+- `gitinfo` still computes all worktrees (`git worktree list --porcelain`; the in-use
+  check needs their paths) but the panel renders only the current checkout per repo
+  plus, with omp live in the pane, the in-use worktrees (short path `~/…`, branch,
+  ahead/behind vs base, dirty marker) as indented rows with a 3 px accent bar.
+- Visual design (user round): a dark card (`#1e1f24`, 8 px padding, CSS scoped to the
+  panel's own class, never global). Header `GIT · vs <base>` plus an `omp` badge when
+  omp is live. Per repo: branch glyph, bold name, branch pill, green `↑N` and
+  orange/red `↓N` badges (red above 10) when non-zero, an `in sync` pill when both are
+  zero, an amber `●` for uncommitted changes, `detached @sha` in amber, `?` with the
+  error as tooltip. Rows have the full path as tooltip.
 - Base for ahead/behind (my call): the remote default branch from
   `git symbolic-ref refs/remotes/origin/HEAD` (here `origin/main`); fall back to
   local `main`, then `master`; if none exists show no ahead/behind. Never fetch;
@@ -258,10 +267,11 @@ logged-in account is always visible at the bottom of each Terminator window.
 2. Click → panel appears inside that pane, the terminal stays in the same pane and
    keeps working; click again → panel gone, terminal full height. No new split.
 3. In `~/ros_ws/src/robot_driver`: panel shows branch `feat/my-feature`
-   (as of writing), ahead/behind vs `origin/main`, dirty flag, and its 10 worktrees.
-4. In `~/ros_ws`: panel lists every repo under `src/`, each with its worktrees.
+   (as of writing), ahead/behind vs `origin/main` and the dirty flag (no worktree list).
+4. In `~/ros_ws`: panel lists every repo under `src/`, one row each.
 5. In a pane running omp that is working in `ros_ws/.worktrees/v2-ws/...`, that
-   worktree is highlighted; the same panel in a pane without omp highlights none.
+   worktree is listed (and only the in-use ones); the same panel in a pane without omp
+   lists no worktrees.
 6. Outside any repo: "Not a git repository".
 7. Usage bar visible at the bottom of each window; values match the latest
    `usage_history` rows; survives splitting, closing panes, zoom/unzoom, new tab,
