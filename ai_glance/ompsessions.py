@@ -16,7 +16,7 @@ TERMINAL_SESSIONS = Path.home() / '.omp/agent/terminal-sessions'
 
 _HEAD_BYTES = 64 * 1024
 
-_CACHE_MAX = 64
+_CACHE_MAX = 256  # session logs + subagent logs of every agent pane
 _cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 
@@ -79,18 +79,24 @@ def _parse_ts(value) -> Optional[datetime]:
 
 
 def _line_paths(obj: dict, cwd: Optional[str]) -> list:
-    """Raw path strings referenced by one JSONL record."""
+    """Raw path strings referenced by one JSONL record (omp or Claude Code)."""
     out = []
-    if obj.get('type') == 'session':
-        out.append(obj.get('cwd'))
+    if isinstance(obj.get('cwd'), str):  # omp session record; every Claude Code record
+        out.append(obj['cwd'])
     message = obj.get('message')
     if isinstance(message, dict):
         content = message.get('content')
         if isinstance(content, list):
             for item in content:
-                args = item.get('arguments') if isinstance(item, dict) else None
+                if not isinstance(item, dict):
+                    continue
+                args = item.get('arguments')  # omp tool call
                 if isinstance(args, dict):
                     out += [args.get('path'), args.get('cwd')]
+                tool_input = item.get('input')  # Claude Code tool_use
+                if isinstance(tool_input, dict):
+                    out += [tool_input.get('file_path'), tool_input.get('path'),
+                            tool_input.get('notebook_path')]
         details = message.get('details')
         if isinstance(details, dict):
             out += [details.get('cwd'), details.get('path')]
@@ -149,7 +155,7 @@ def _parse_log(log: Path, size: int, tail_bytes: int, base_cwd: Optional[str] = 
             continue
         if not isinstance(obj, dict):
             continue
-        if obj.get('type') == 'session' and isinstance(obj.get('cwd'), str):
+        if isinstance(obj.get('cwd'), str):
             cwd = obj['cwd']
         when = _parse_ts(obj.get('timestamp'))
         if when is None:
@@ -185,33 +191,38 @@ def _entries(log: Path, tail_bytes: int, base_cwd: Optional[str],
     return entries
 
 
-def recent_paths(log: Path, now: datetime, window: timedelta = timedelta(minutes=15),
-                 tail_bytes: int = 512 * 1024, base_cwd: Optional[str] = None,
-                 errors: Optional[list] = None) -> set:
-    """Paths referenced in the last ``window`` by the session log and its subagents.
+def _subagent_logs(log: Path) -> list:
+    """Subagent logs next to a session log: omp ``<stem>/*.jsonl``, Claude Code
+    ``<stem>/subagents/*.jsonl``."""
+    base = log.with_suffix('')
+    try:
+        return sorted(list(base.glob('*.jsonl')) + list(base.glob('subagents/*.jsonl')))
+    except OSError:
+        return []
 
-    ``base_cwd`` resolves relative paths when a log has no session record; it
-    is only a fallback (the log's own session record wins, subagents inherit
-    the parent's cwd).
-    """
-    cutoff = now - window
+
+def working_paths(log: Path, now: datetime, window: timedelta = timedelta(minutes=15),
+                  tail_bytes: int = 512 * 1024, base_cwd: Optional[str] = None,
+                  errors: Optional[list] = None) -> set:
+    """Paths the session was working with: those referenced in the ``window`` before
+    its newest path reference (at or before ``now``), across the session log and all
+    its subagent logs. Anchoring on the session's own activity (not on ``now``) keeps
+    the result while the session sits idle waiting for input or was just resumed.
+
+    ``base_cwd`` resolves relative paths when a log has no session record; it is only
+    a fallback (the log's own records win, subagents inherit the parent's cwd)."""
     try:
         parent_cwd = _head_cwd(log) or base_cwd
     except OSError:
         parent_cwd = base_cwd
-    logs = [(log, base_cwd)]
-    try:
-        for sub in sorted(log.with_suffix('').glob('*.jsonl')):
-            try:
-                mtime = datetime.fromtimestamp(sub.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                continue
-            if mtime >= cutoff:
-                logs.append((sub, parent_cwd))
-    except OSError:
-        pass
-    return {p for lg, base in logs for when, p in _entries(lg, tail_bytes, base, errors)
-            if when >= cutoff}
+    entries = list(_entries(log, tail_bytes, base_cwd, errors))
+    for sub in _subagent_logs(log):
+        entries += _entries(sub, tail_bytes, parent_cwd, errors)
+    stamps = [when for when, _p in entries if when <= now]
+    if not stamps:
+        return set()
+    cutoff = max(stamps) - window
+    return {p for when, p in entries if cutoff <= when <= now}
 
 
 def worktrees_in_use(paths: Iterable[Path], worktrees: Iterable[Path]) -> set:
@@ -236,23 +247,92 @@ def worktrees_in_use(paths: Iterable[Path], worktrees: Iterable[Path]) -> set:
     return used
 
 
+CLAUDE_DIR = Path.home() / '.claude'
+OMP, CLAUDE = 'omp', 'Claude Code'
+
+
+def _agent_pid_on_tty(tty: str, proc: Path) -> Optional[tuple]:
+    """(agent name, pid) of the coding agent whose stdin is ``tty``; omp wins."""
+    found = {}
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if os.readlink(entry / 'fd' / '0') != tty:
+                continue
+            argv = [a for a in (entry / 'cmdline').read_bytes().split(b'\0') if a]
+        except OSError:
+            continue
+        names = {os.path.basename(a) for a in argv}
+        if b'omp' in names:
+            found.setdefault(OMP, int(entry.name))
+        elif argv and os.path.basename(argv[0]) == b'claude':
+            found.setdefault(CLAUDE, int(entry.name))
+    for name in (OMP, CLAUDE):
+        if name in found:
+            return name, found[name]
+    return None
+
+
+def claude_session_log(pid: int, claude_dir: Path = CLAUDE_DIR) -> Optional[Path]:
+    """Session log of the Claude Code process ``pid``: ``sessions/<pid>.json`` names
+    the session id, ``projects/*/<id>.jsonl`` holds it (newest if several)."""
+    try:
+        sid = json.loads((claude_dir / 'sessions' / f'{pid}.json').read_text()).get('sessionId')
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(sid, str) or not sid or '/' in sid:
+        return None
+    logs = []
+    for f in (claude_dir / 'projects').glob(f'*/{sid}.jsonl'):
+        try:
+            logs.append((f.stat().st_mtime, f))
+        except OSError:
+            continue
+    return max(logs)[1] if logs else None
+
+
+def pane_agent(shell_pid: Optional[int], proc: Path = Path('/proc'),
+               sessions_dir: Path = TERMINAL_SESSIONS,
+               claude_dir: Path = CLAUDE_DIR) -> Optional[tuple]:
+    """(agent name, session log, fallback cwd) of the agent running in this pane,
+    or None. Never raises."""
+    try:
+        tty = pane_tty(shell_pid, proc)
+        hit = _agent_pid_on_tty(tty, proc) if tty else None
+        if hit is None:
+            return None
+        name, pid = hit
+        if name == OMP:
+            log, cwd = session_log_for_tty(tty, sessions_dir), session_cwd_for_tty(tty, sessions_dir)
+        else:
+            log, cwd = claude_session_log(pid, claude_dir), None
+        return (name, log, cwd) if log is not None else None
+    except Exception:  # noqa: BLE001 - contract: never raises
+        return None
+
+
 def pane_worktrees_in_use(shell_pid: Optional[int], worktrees: Iterable[Path], now: datetime,
                           proc: Path = Path('/proc'),
                           sessions_dir: Path = TERMINAL_SESSIONS,
-                          errors: Optional[list] = None) -> set:
-    """Worktrees touched recently by the omp session on this pane. Never raises.
+                          errors: Optional[list] = None,
+                          claude_dir: Path = CLAUDE_DIR) -> set:
+    """Worktrees the agent (omp or Claude Code) on this pane is working in. Never raises.
 
+    The window is measured back from the session's newest path reference, not from
+    ``now``, so a session that waits for input still shows where it was working.
     Exceptions are appended to ``errors`` (if given) so the caller can log them.
     """
     try:
-        tty = pane_tty(shell_pid, proc)
-        if tty is None or not omp_running_on_tty(tty, proc):
+        agent = pane_agent(shell_pid, proc, sessions_dir, claude_dir)
+        if agent is None:
             return set()
-        log = session_log_for_tty(tty, sessions_dir)
-        if log is None:
-            return set()
-        paths = recent_paths(log, now, base_cwd=session_cwd_for_tty(tty, sessions_dir),
-                             errors=errors)
+        _name, log, cwd = agent
+        paths = working_paths(log, now, base_cwd=cwd, errors=errors)
         return worktrees_in_use(paths, worktrees)
     except Exception as exc:
         if errors is not None:

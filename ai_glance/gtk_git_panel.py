@@ -114,7 +114,7 @@ def _log_once(exc):
 
 
 def _compute(cwd, pid):
-    """Worker-thread computation. Returns (model, in_use) or None."""
+    """Worker-thread computation. Returns (model, in_use, agent name) or None."""
     try:
         model = gitinfo.build_model(Path(cwd))
         paths = [wt.path for repo in model.repos for wt in repo.worktrees]
@@ -123,7 +123,8 @@ def _compute(cwd, pid):
             pid, paths, datetime.now(timezone.utc), errors=errors)
         for exc in errors:
             _log_once(exc)
-        return model, set(in_use)
+        agent = ompsessions.pane_agent(pid) if in_use else None
+        return model, set(in_use), agent[0] if agent else ompsessions.OMP
     except Exception as exc:  # never raise into Terminator
         dbg('ai_glance git panel: refresh failed: %r' % (exc,))
         return None
@@ -256,19 +257,19 @@ class GitPanel(Gtk.Box):
         self._style_tree(self._content)
         self._content.show_all()
 
-    def _header(self, base_text, omp_live, tooltip):
+    def _header(self, base_text, agent, tooltip):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         label = Gtk.Label(label=base_text, xalign=0)
         label.get_style_context().add_class('gg-muted')
         label.get_style_context().add_class('gg-header')
         label.set_tooltip_text(tooltip)
         box.pack_start(label, False, False, 0)
-        if omp_live:
-            box.pack_start(_pill('omp', 'gg-omp-badge', tooltip='omp is running in this pane'),
+        if agent:
+            box.pack_start(_pill(agent, 'gg-omp-badge', tooltip='%s is running in this pane' % agent),
                            False, False, 0)
         return box
 
-    def _repo_card(self, repo, in_use, first, show_base):
+    def _repo_card(self, repo, in_use, first, show_base, agent):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         ctx = card.get_style_context()
         ctx.add_class('gg-repo')
@@ -286,7 +287,7 @@ class GitPanel(Gtk.Box):
                            False, False, 0)
         else:
             if current_in_use:
-                row.pack_start(_pill('omp', 'gg-omp-badge', tooltip='omp works in this checkout'),
+                row.pack_start(_pill(agent, 'gg-omp-badge', tooltip='%s works in this checkout' % agent),
                                False, False, 0)
             for w in _state_widgets(current):
                 row.pack_start(w, False, False, 0)
@@ -307,9 +308,9 @@ class GitPanel(Gtk.Box):
             card.pack_start(line, False, False, 0)
         return card
 
-    def _render(self, model, in_use):
+    def _render(self, model, in_use, agent=ompsessions.OMP):
         self._update_max_height()
-        key = (model, frozenset(in_use))
+        key = (model, frozenset(in_use), agent)
         if key == self._last_key:
             return
         if model is None:
@@ -334,13 +335,14 @@ class GitPanel(Gtk.Box):
             show_base = True
         kind = 'workspace' if model.kind == 'workspace' else 'repo'
         self._content.pack_start(
-            self._header(base_text, bool(in_use), '%s %s' % (kind, _short_path(model.path))),
+            self._header(base_text, agent if in_use else None,
+                         '%s %s' % (kind, _short_path(model.path))),
             False, False, 0)
         if not model.repos:
             self._content.pack_start(Gtk.Label(label='no git repositories found', xalign=0),
                                      False, False, 0)
         for i, repo in enumerate(model.repos):
-            self._content.pack_start(self._repo_card(repo, in_use, i == 0, show_base),
+            self._content.pack_start(self._repo_card(repo, in_use, i == 0, show_base, agent),
                                      False, False, 0)
         self._last_key = key
         self._style_tree(self._content)

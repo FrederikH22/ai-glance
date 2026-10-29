@@ -50,33 +50,34 @@ def test_omp_running_on_tty(tmp_path):
     assert not om.omp_running_on_tty('/dev/pts/9', tmp_path)
 
 
-def test_recent_paths_window(tmp_path):
+def test_working_paths_window_anchored_on_last_activity(tmp_path):
     log = tmp_path / 's.jsonl'
+    # Work ended 2 h ago, then the session only did bookkeeping (resume, idle).
     write_lines(log, [
-        {'type': 'session', 'cwd': '/w/ws', 'timestamp': ts(timedelta(hours=1))},
-        msg(ts(timedelta(minutes=30)), path='/old/file'),
-        msg(ts(timedelta(minutes=5)), path='/new/file'),
-        msg(ts(timedelta(minutes=4)), path='rel/x.py'),
-        {'type': 'message', 'timestamp': ts(timedelta(minutes=3)),
+        {'type': 'session', 'cwd': '/w/ws', 'timestamp': ts(timedelta(hours=3))},
+        msg(ts(timedelta(minutes=150)), path='/old/file'),       # 30 min before the last work
+        msg(ts(timedelta(minutes=125)), path='/new/file'),
+        msg(ts(timedelta(minutes=124)), path='rel/x.py'),
+        {'type': 'message', 'timestamp': ts(timedelta(minutes=123)),
          'message': {'details': {'cwd': '/det/cwd'}}},
+        {'type': 'custom', 'customType': 'session_resume', 'timestamp': ts(timedelta(minutes=1))},
     ])
     sub = tmp_path / 's' / 'sub.jsonl'
-    write_lines(sub, [msg(ts(timedelta(minutes=2)), path='/sub/file')])
+    write_lines(sub, [msg(ts(timedelta(minutes=120)), path='/sub/file')])
     (tmp_path / 's' / 'x.log').write_text('/ignored\n')
-    stale = tmp_path / 's' / 'stale.jsonl'
-    write_lines(stale, [msg(ts(timedelta(minutes=1)), path='/stale/file')])
-    old = (NOW - timedelta(hours=2)).timestamp()
-    os.utime(stale, (old, old))
-    got = om.recent_paths(log, NOW)
+    got = om.working_paths(log, NOW)
     assert got == {Path('/new/file'), Path('/w/ws/rel/x.py'),
                    Path('/det/cwd'), Path('/sub/file')}
+    # entries after ``now`` do not count
+    write_lines(sub, [msg(ts(timedelta(minutes=-5)), path='/future/file')])
+    assert Path('/future/file') not in om.working_paths(log, NOW)
 
 
-def test_recent_paths_tail_cut(tmp_path):
+def test_working_paths_tail_cut(tmp_path):
     log = tmp_path / 's.jsonl'
     lines = [json.dumps(msg(ts(timedelta(minutes=5)), path=f'/p/{i}')) for i in range(20)]
     log.write_text('\n'.join(lines) + '\n{"type":"message","timestamp":"' + ts(timedelta(minutes=1)) + '","mess')
-    got = om.recent_paths(log, NOW, tail_bytes=300)
+    got = om.working_paths(log, NOW, tail_bytes=300)
     assert Path('/p/19') in got
     assert Path('/p/0') not in got
 
@@ -119,7 +120,7 @@ def title_first_log(path, n=40):
 def test_relative_path_resolved_when_tail_cut_title_first(tmp_path):
     log = tmp_path / 's.jsonl'
     title_first_log(log)
-    got = om.recent_paths(log, NOW, tail_bytes=1500)
+    got = om.working_paths(log, NOW, tail_bytes=1500)
     assert Path('/w/ws/.worktrees/v2/src/a.cpp') in got
     assert Path('/w/ws/pad/0') not in got  # really cut
 
@@ -128,8 +129,8 @@ def test_relative_path_falls_back_to_pts_cwd(tmp_path):
     log = tmp_path / 's.jsonl'
     write_lines(log, [{'type': 'title', 'title': 'x'},
                       msg(ts(timedelta(minutes=1)), path='rel/a.py')])
-    assert om.recent_paths(log, NOW) == set()
-    assert om.recent_paths(log, NOW, base_cwd='/pts/cwd') == {Path('/pts/cwd/rel/a.py')}
+    assert om.working_paths(log, NOW) == set()
+    assert om.working_paths(log, NOW, base_cwd='/pts/cwd') == {Path('/pts/cwd/rel/a.py')}
 
 
 def test_subagent_uses_own_session_else_parent_cwd(tmp_path):
@@ -140,14 +141,14 @@ def test_subagent_uses_own_session_else_parent_cwd(tmp_path):
         {'type': 'session', 'cwd': '/own', 'timestamp': ts(timedelta(hours=1))},
         msg(ts(timedelta(minutes=1)), path='x.py')])
     write_lines(sub_dir / 'bare.jsonl', [msg(ts(timedelta(minutes=1)), path='y.py')])
-    got = om.recent_paths(log, NOW)
+    got = om.working_paths(log, NOW)
     assert got == {Path('/own/x.py'), Path('/parent/y.py')}
 
 
 def test_semicolon_separated_paths_are_split(tmp_path):
     log = tmp_path / 's.jsonl'
     write_lines(log, [msg(ts(timedelta(minutes=1)), path='/a/b;rel/c; /d/e;;')])
-    assert om.recent_paths(log, NOW, base_cwd='/w') == {
+    assert om.working_paths(log, NOW, base_cwd='/w') == {
         Path('/a/b'), Path('/w/rel/c'), Path('/d/e')}
 
 
@@ -156,7 +157,7 @@ def test_cache_is_bounded(tmp_path):
     for i in range(om._CACHE_MAX + 10):
         log = tmp_path / f'{i}.jsonl'
         write_lines(log, [msg(ts(timedelta(minutes=1)), path=f'/p/{i}')])
-        om.recent_paths(log, NOW)
+        om.working_paths(log, NOW)
     assert len(om._cache) <= om._CACHE_MAX
 
 
@@ -170,7 +171,7 @@ def test_parse_failure_is_reported_not_raised(tmp_path, monkeypatch):
 
     monkeypatch.setattr(om, '_parse_log', boom)
     errors = []
-    assert om.recent_paths(log, NOW, errors=errors) == set()
+    assert om.working_paths(log, NOW, errors=errors) == set()
     assert [type(e) for e in errors] == [ValueError]
 
     proc = tmp_path / 'proc'
@@ -253,3 +254,53 @@ def test_pane_omp_state_needs_live_omp(tmp_path):
     make_proc(proc, 101, '/dev/pts/7', ['bun', '/x/omp'])
     assert om.pane_omp_state(100, proc, sessions, now=1e12) == om.NEEDS_INPUT
     assert om.pane_omp_state(None, proc, sessions) is None
+
+
+# --- Claude Code panes -------------------------------------------------------------
+
+def claude_record(t, cwd, **tool_input):
+    rec = {'type': 'assistant', 'timestamp': t, 'cwd': cwd, 'message': {'content': []}}
+    if tool_input:
+        rec['message']['content'].append({'type': 'tool_use', 'name': 'Edit', 'input': tool_input})
+    return rec
+
+
+def test_claude_code_pane_worktrees(tmp_path):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    claude = tmp_path / 'claude'
+    (claude / 'sessions').mkdir(parents=True)
+    (claude / 'sessions' / '300.json').write_text(json.dumps({'pid': 300, 'sessionId': 'sid-1'}))
+    log = claude / 'projects' / '-home-u' / 'sid-1.jsonl'
+    write_lines(log, [
+        claude_record(ts(timedelta(minutes=200)), '/w/old'),
+        claude_record(ts(timedelta(minutes=95)), '/w/a', file_path='/w/b/src/x.cpp'),
+        claude_record(ts(timedelta(minutes=90)), '/home/u'),  # idle since, cwd outside
+    ])
+    write_lines(claude / 'projects' / '-home-u' / 'sid-1' / 'subagents' / 'agent-1.jsonl',
+                [claude_record(ts(timedelta(minutes=91)), '/w/c/src')])
+    make_proc(proc, 200, '/dev/pts/9', ['bash'])
+    make_proc(proc, 300, '/dev/pts/9', ['claude', '--resume', 'sid-1'])
+    trees = [Path('/w/a'), Path('/w/b'), Path('/w/c'), Path('/w/old')]
+    assert om.pane_agent(200, proc, tmp_path / 'none', claude)[:2] == (om.CLAUDE, log)
+    assert om.pane_worktrees_in_use(200, trees, NOW, proc, tmp_path / 'none',
+                                    claude_dir=claude) == {Path('/w/a'), Path('/w/b'), Path('/w/c')}
+    # no session record for that pid -> no agent, no worktrees
+    (claude / 'sessions' / '300.json').unlink()
+    assert om.pane_agent(200, proc, tmp_path / 'none', claude) is None
+
+
+def test_idle_omp_pane_keeps_its_worktree(tmp_path):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    sessions = tmp_path / 'sess'
+    sessions.mkdir()
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [TITLE, msg(ts(timedelta(hours=20)), path='/w/wt/src/a.py'),
+                      {'type': 'custom', 'customType': 'session_resume',
+                       'timestamp': ts(timedelta(minutes=1))}])
+    (sessions / 'pts-7').write_text(f'/w\n{log}\ncwdstat 1 2\n')
+    make_proc(proc, 100, '/dev/pts/7', ['bash'])
+    make_proc(proc, 101, '/dev/pts/7', ['omp', '--resume'])
+    assert om.pane_agent(100, proc, sessions)[0] == om.OMP
+    assert om.pane_worktrees_in_use(100, [Path('/w/wt')], NOW, proc, sessions) == {Path('/w/wt')}
