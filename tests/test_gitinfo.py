@@ -202,3 +202,23 @@ def test_repo_rows_ignores_unknown_paths_and_empty_repo():
     assert gitinfo.repo_rows(repo, {Path('/elsewhere')})[1] == []
     empty = gitinfo.RepoState(Path('/x'), 'x', None, (), 'boom', None)
     assert gitinfo.repo_rows(empty, {Path('/x')}) == (None, [], False)
+
+
+def test_external_repos(tmp_path):
+    def init(path):
+        path.mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(path)], check=True)
+        subprocess.run(['git', '-C', str(path), 'commit', '-q', '--allow-empty', '-m', 'x'],
+                       check=True, env={**os.environ, **ENV})
+        return path
+    shown = init(tmp_path / 'shown')
+    other = init(tmp_path / 'ws' / 'src' / 'other')
+    third = init(tmp_path / 'third')
+    paths = [shown / 'a.py',                       # inside the panel's repo: skipped
+             other / 'pkg' / 'gone' / 'x.cpp',     # missing file: nearest existing dir
+             other / 'b.py', third, tmp_path / 'not-a-repo' / 'c']
+    got = gitinfo.external_repos(paths, [shown])
+    assert [r.name for r in got] == ['other', 'third']
+    assert got[0].current.path == other.resolve()
+    assert gitinfo.external_repos(paths, [shown], limit=1)[0].name == 'other'
+    assert gitinfo.external_repos([], [shown]) == ()

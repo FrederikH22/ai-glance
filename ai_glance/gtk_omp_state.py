@@ -1,11 +1,13 @@
-"""Colour the headers of unfocused panes by the state of the omp running in them.
+"""Colour the headers of unfocused panes by the state of the coding agent (omp or
+Claude Code) running in them.
 
-- omp working (turn running, tool in flight, subagents still writing): pastel green
-- omp waiting for the user (turn over, or an ``ask`` is open): pulsing orange
-- no live omp in the pane: stock colours, untouched
+- agent working (turn running, tool in flight, subagents/background agents running):
+  pastel green
+- agent waiting for the user (turn over, ``ask``/permission prompt open): pulsing orange
+- no live agent in the pane: stock colours, untouched
 
 The focused pane keeps ``gtk_titlebar_color``'s gradient; this module never paints
-an active titlebar. States come from ``ompsessions.pane_omp_state``, polled every
+an active titlebar. States come from ``ompsessions.pane_agent_state``, polled every
 ``POLL_SECONDS`` in one worker thread for all panes and applied on the GTK main
 thread. Painting uses ``draw`` handlers that run before the titlebar's own
 background; while a state colour shows, the stock background is made transparent
@@ -166,7 +168,7 @@ def _poll():
 
 
 def _read_states(panes):
-    results = [(titlebar, ompsessions.pane_omp_state(pid)) for titlebar, pid in panes]
+    results = [(titlebar, ompsessions.pane_agent_state(pid)) for titlebar, pid in panes]
     GLib.idle_add(_apply_states, results)
 
 

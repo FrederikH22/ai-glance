@@ -5,6 +5,10 @@ from pathlib import Path
 
 from ai_glance import ompsessions as om
 
+
+def in_use(pid, trees, now, *args, **kw):
+    return om.worktrees_in_use(om.pane_agent_paths(pid, now, *args, **kw)[1], trees)
+
 NOW = datetime(2026, 10, 26, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -42,12 +46,12 @@ def test_session_log_for_tty(tmp_path):
     assert om.session_log_for_tty('/dev/pts/8', tmp_path) is None
 
 
-def test_omp_running_on_tty(tmp_path):
+def test_agent_pid_on_tty(tmp_path):
     make_proc(tmp_path, 1, '/dev/pts/7', ['bun', '/home/u/.bun/bin/omp'])
     make_proc(tmp_path, 2, '/dev/pts/9', ['vim', 'omp_notes.md'])
-    assert om.omp_running_on_tty('/dev/pts/7', tmp_path)
-    assert not om.omp_running_on_tty('/dev/pts/8', tmp_path)
-    assert not om.omp_running_on_tty('/dev/pts/9', tmp_path)
+    assert om._agent_pid_on_tty('/dev/pts/7', tmp_path)[0] == om.OMP
+    assert om._agent_pid_on_tty('/dev/pts/8', tmp_path) is None
+    assert om._agent_pid_on_tty('/dev/pts/9', tmp_path) is None
 
 
 def test_working_paths_window_anchored_on_last_activity(tmp_path):
@@ -103,9 +107,9 @@ def test_pane_worktrees_in_use_stale_session(tmp_path):
     sessions.mkdir()
     (sessions / 'pts-7').write_text(f'/w\n{log}\ncwdstat 1 2\n')
     make_proc(proc, 100, '/dev/pts/7', ['bash'])
-    assert om.pane_worktrees_in_use(100, [Path('/w')], NOW, proc, sessions) == set()
+    assert in_use(100, [Path('/w')], NOW, proc, sessions) == set()
     make_proc(proc, 101, '/dev/pts/7', ['bun', '/x/omp'])
-    assert om.pane_worktrees_in_use(100, [Path('/w')], NOW, proc, sessions) == {Path('/w')}
+    assert in_use(100, [Path('/w')], NOW, proc, sessions) == {Path('/w')}
 
 
 def title_first_log(path, n=40):
@@ -181,7 +185,7 @@ def test_parse_failure_is_reported_not_raised(tmp_path, monkeypatch):
     (sessions / 'pts-7').write_text(f'/w\n{log}\ncwdstat 1 2\n')
     make_proc(proc, 100, '/dev/pts/7', ['bun', '/x/omp'])
     errors = []
-    assert om.pane_worktrees_in_use(100, [Path('/p')], NOW, proc, sessions, errors) == set()
+    assert in_use(100, [Path('/p')], NOW, proc, sessions, errors) == set()
     assert [type(e) for e in errors] == [ValueError]
 
 
@@ -241,7 +245,7 @@ def test_session_state_tail_cut_and_half_written_line(tmp_path, monkeypatch):
     assert om.session_state(log, now=1e12) == om.NEEDS_INPUT
 
 
-def test_pane_omp_state_needs_live_omp(tmp_path):
+def test_pane_agent_state_needs_live_omp(tmp_path):
     proc = tmp_path / 'proc'
     proc.mkdir()
     sessions = tmp_path / 'sess'
@@ -250,10 +254,10 @@ def test_pane_omp_state_needs_live_omp(tmp_path):
     write_lines(log, [TITLE, USER, assistant('stop')])
     (sessions / 'pts-7').write_text(f'/w\n{log}\ncwdstat 1 2\n')
     make_proc(proc, 100, '/dev/pts/7', ['bash'])
-    assert om.pane_omp_state(100, proc, sessions) is None      # stale pts file, no omp
+    assert om.pane_agent_state(100, proc, sessions) is None      # stale pts file, no omp
     make_proc(proc, 101, '/dev/pts/7', ['bun', '/x/omp'])
-    assert om.pane_omp_state(100, proc, sessions, now=1e12) == om.NEEDS_INPUT
-    assert om.pane_omp_state(None, proc, sessions) is None
+    assert om.pane_agent_state(100, proc, sessions, now=1e12) == om.NEEDS_INPUT
+    assert om.pane_agent_state(None, proc, sessions) is None
 
 
 # --- Claude Code panes -------------------------------------------------------------
@@ -283,7 +287,7 @@ def test_claude_code_pane_worktrees(tmp_path):
     make_proc(proc, 300, '/dev/pts/9', ['claude', '--resume', 'sid-1'])
     trees = [Path('/w/a'), Path('/w/b'), Path('/w/c'), Path('/w/old')]
     assert om.pane_agent(200, proc, tmp_path / 'none', claude)[:2] == (om.CLAUDE, log)
-    assert om.pane_worktrees_in_use(200, trees, NOW, proc, tmp_path / 'none',
+    assert in_use(200, trees, NOW, proc, tmp_path / 'none',
                                     claude_dir=claude) == {Path('/w/a'), Path('/w/b'), Path('/w/c')}
     # no session record for that pid -> no agent, no worktrees
     (claude / 'sessions' / '300.json').unlink()
@@ -303,4 +307,20 @@ def test_idle_omp_pane_keeps_its_worktree(tmp_path):
     make_proc(proc, 100, '/dev/pts/7', ['bash'])
     make_proc(proc, 101, '/dev/pts/7', ['omp', '--resume'])
     assert om.pane_agent(100, proc, sessions)[0] == om.OMP
-    assert om.pane_worktrees_in_use(100, [Path('/w/wt')], NOW, proc, sessions) == {Path('/w/wt')}
+    assert in_use(100, [Path('/w/wt')], NOW, proc, sessions) == {Path('/w/wt')}
+
+
+def test_claude_code_pane_state(tmp_path):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    claude = tmp_path / 'claude'
+    (claude / 'sessions').mkdir(parents=True)
+    make_proc(proc, 200, '/dev/pts/9', ['bash'])
+    make_proc(proc, 300, '/dev/pts/9', ['claude'])
+    record = claude / 'sessions' / '300.json'
+    for status, want in (('busy', om.WORKING), ('waiting', om.NEEDS_INPUT),
+                         ('idle', om.NEEDS_INPUT), ('something-new', None)):
+        record.write_text(json.dumps({'pid': 300, 'sessionId': 's', 'status': status}))
+        assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) == want, status
+    record.unlink()
+    assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) is None

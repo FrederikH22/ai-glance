@@ -49,25 +49,6 @@ def session_cwd_for_tty(tty: str, sessions_dir: Path = TERMINAL_SESSIONS) -> Opt
     return lines[0].strip() or None if lines else None
 
 
-def omp_running_on_tty(tty: str, proc: Path = Path('/proc')) -> bool:
-    try:
-        entries = list(proc.iterdir())
-    except OSError:
-        return False
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            if os.readlink(entry / 'fd' / '0') != tty:
-                continue
-            argv = (entry / 'cmdline').read_bytes().split(b'\0')
-        except OSError:
-            continue
-        if any(os.path.basename(a) == b'omp' for a in argv if a):
-            return True
-    return False
-
-
 def _parse_ts(value) -> Optional[datetime]:
     if not isinstance(value, str):
         return None
@@ -316,28 +297,26 @@ def pane_agent(shell_pid: Optional[int], proc: Path = Path('/proc'),
         return None
 
 
-def pane_worktrees_in_use(shell_pid: Optional[int], worktrees: Iterable[Path], now: datetime,
-                          proc: Path = Path('/proc'),
-                          sessions_dir: Path = TERMINAL_SESSIONS,
-                          errors: Optional[list] = None,
-                          claude_dir: Path = CLAUDE_DIR) -> set:
-    """Worktrees the agent (omp or Claude Code) on this pane is working in. Never raises.
+def pane_agent_paths(shell_pid: Optional[int], now: datetime,
+                     proc: Path = Path('/proc'),
+                     sessions_dir: Path = TERMINAL_SESSIONS,
+                     errors: Optional[list] = None,
+                     claude_dir: Path = CLAUDE_DIR) -> tuple:
+    """(agent name or None, paths it is working with) for the agent (omp or Claude Code)
+    on this pane; see ``working_paths``. Never raises.
 
-    The window is measured back from the session's newest path reference, not from
-    ``now``, so a session that waits for input still shows where it was working.
     Exceptions are appended to ``errors`` (if given) so the caller can log them.
     """
     try:
         agent = pane_agent(shell_pid, proc, sessions_dir, claude_dir)
         if agent is None:
-            return set()
-        _name, log, cwd = agent
-        paths = working_paths(log, now, base_cwd=cwd, errors=errors)
-        return worktrees_in_use(paths, worktrees)
+            return None, set()
+        name, log, cwd = agent
+        return name, working_paths(log, now, base_cwd=cwd, errors=errors)
     except Exception as exc:
         if errors is not None:
             errors.append(exc)
-        return set()
+        return None, set()
 
 
 # --- session state -------------------------------------------------------------
@@ -407,14 +386,34 @@ def session_state(log: Path, now: Optional[float] = None) -> Optional[str]:
     return WORKING  # user message, tool result, delivered job result: a turn is running
 
 
-def pane_omp_state(shell_pid: Optional[int], proc: Path = Path('/proc'),
-                   sessions_dir: Path = TERMINAL_SESSIONS,
-                   now: Optional[float] = None) -> Optional[str]:
-    """State of the omp running in this pane, or None (no live omp). Never raises."""
+_CLAUDE_STATES = {'busy': WORKING, 'waiting': NEEDS_INPUT, 'idle': NEEDS_INPUT}
+
+
+def claude_state(pid: int, claude_dir: Path = CLAUDE_DIR) -> Optional[str]:
+    """State of the Claude Code process ``pid`` from ``sessions/<pid>.json``: ``busy``
+    (a turn or background agents running) is WORKING; ``waiting`` (permission prompt
+    and the like) and ``idle`` (turn over) are NEEDS_INPUT."""
+    try:
+        status = json.loads((claude_dir / 'sessions' / f'{pid}.json').read_text()).get('status')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return _CLAUDE_STATES.get(status)
+
+
+def pane_agent_state(shell_pid: Optional[int], proc: Path = Path('/proc'),
+                     sessions_dir: Path = TERMINAL_SESSIONS,
+                     now: Optional[float] = None,
+                     claude_dir: Path = CLAUDE_DIR) -> Optional[str]:
+    """State of the agent (omp or Claude Code) running in this pane, or None (no live
+    agent). Never raises."""
     try:
         tty = pane_tty(shell_pid, proc)
-        if tty is None or not omp_running_on_tty(tty, proc):
+        hit = _agent_pid_on_tty(tty, proc) if tty else None
+        if hit is None:
             return None
+        name, pid = hit
+        if name == CLAUDE:
+            return claude_state(pid, claude_dir)
         log = session_log_for_tty(tty, sessions_dir)
         if log is None or not log.exists():
             return None

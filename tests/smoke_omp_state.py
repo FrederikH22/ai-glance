@@ -87,7 +87,7 @@ def focus(term):
 
 # Fake omp states per shell pid: no real omp runs inside Xvfb.
 STATES = {}
-ompsessions.pane_omp_state = lambda pid, *a, **k: STATES.get(pid)
+ompsessions.pane_agent_state = lambda pid, *a, **k: STATES.get(pid)
 
 
 def poll():

@@ -200,8 +200,8 @@ shot('accept-panel-robot_driver.png')
 # 8: omp live in the pane -> exactly the in-use worktrees ---------------------------
 current_path = model.repos[0].current.path if model.repos[0].current else wt_paths[0]
 targets = [p for p in wt_paths if p != current_path][:2]
-real_fn = gtk_git_panel.ompsessions.pane_worktrees_in_use
-gtk_git_panel.ompsessions.pane_worktrees_in_use = lambda pid, paths, now, **kw: set(targets)
+real_fn = gtk_git_panel.ompsessions.pane_agent_paths
+gtk_git_panel.ompsessions.pane_agent_paths = lambda pid, now, **kw: ('omp', set(targets))
 panel._last_key = None
 panel.refresh()
 pump(8.0, lambda: len(omp_rows(panel)) == 2 and not panel._in_flight)
@@ -217,7 +217,19 @@ shot('accept-highlight.png')
 if SHOTS:
     pump(0.5)
     subprocess.run(['import', '-window', 'root', str(Path(SHOTS) / 'user-git-panel-omp.png')], check=False)
-gtk_git_panel.ompsessions.pane_worktrees_in_use = real_fn
+# 8b: the agent also works in a repo outside the pane's folder (this plugin's own repo)
+_own = Path(__file__).resolve().parent.parent
+gtk_git_panel.ompsessions.pane_agent_paths = \
+    lambda pid, now, **kw: ('Claude Code', {targets[0], _own / 'README.md'})
+panel._last_key = None
+panel.refresh()
+pump(8.0, lambda: 'Claude Code also works in' in label_texts(panel) and not panel._in_flight)
+check('8b: section for repos outside the pane folder', 'Claude Code also works in' in label_texts(panel))
+check(f'8b: the outside repo ({_own.name}) is listed with its branch',
+      _own.name in label_texts(panel))
+check('8b: agent badge names Claude Code', label_texts(panel).count('Claude Code') >= 1)
+shot('git-panel-external.png')
+gtk_git_panel.ompsessions.pane_agent_paths = real_fn
 panel._last_key = None
 panel.refresh()
 pump(8.0, lambda: not omp_rows(panel) and not panel._in_flight)

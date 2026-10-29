@@ -114,17 +114,21 @@ def _log_once(exc):
 
 
 def _compute(cwd, pid):
-    """Worker-thread computation. Returns (model, in_use, agent name) or None."""
+    """Worker-thread computation. Returns (model, in_use, agent name, external repos)
+    or None. ``external`` are repos the pane's agent works in outside ``model``."""
     try:
         model = gitinfo.build_model(Path(cwd))
-        paths = [wt.path for repo in model.repos for wt in repo.worktrees]
+        covered = [wt.path for repo in model.repos for wt in repo.worktrees]
         errors = []
-        in_use = ompsessions.pane_worktrees_in_use(
-            pid, paths, datetime.now(timezone.utc), errors=errors)
+        agent, agent_paths = ompsessions.pane_agent_paths(
+            pid, datetime.now(timezone.utc), errors=errors)
         for exc in errors:
             _log_once(exc)
-        agent = ompsessions.pane_agent(pid) if in_use else None
-        return model, set(in_use), agent[0] if agent else ompsessions.OMP
+        in_use = ompsessions.worktrees_in_use(agent_paths, covered)
+        external = gitinfo.external_repos(agent_paths, covered) if agent_paths else ()
+        in_use |= ompsessions.worktrees_in_use(
+            agent_paths, [wt.path for repo in external for wt in repo.worktrees])
+        return model, set(in_use), agent or ompsessions.OMP, external
     except Exception as exc:  # never raise into Terminator
         dbg('ai_glance git panel: refresh failed: %r' % (exc,))
         return None
@@ -308,45 +312,67 @@ class GitPanel(Gtk.Box):
             card.pack_start(line, False, False, 0)
         return card
 
-    def _render(self, model, in_use, agent=ompsessions.OMP):
+    def _render(self, model, in_use, agent=ompsessions.OMP, external=()):
         self._update_max_height()
-        key = (model, frozenset(in_use), agent)
+        key = (model, frozenset(in_use), agent, tuple(external))
         if key == self._last_key:
             return
         if model is None:
             self._set_text('Git status: n/a')
             self._last_key = key
             return
-        if model.kind == 'none':
+        if model.kind == 'none' and not external:
             self._set_text('Not a git repository: %s' % _short_path(model.path))
             self._last_key = key
             return
         self._clear()
-        bases = {r.base for r in model.repos}
+        bases = {r.base for r in (model.repos or external)}
         real_bases = {b for b in bases if b}
         if len(real_bases) == 1 and None not in bases:
-            base_text = 'GIT \u00b7 vs %s' % next(iter(real_bases))
+            header_base = next(iter(real_bases))
+            base_text = 'GIT \u00b7 vs %s' % header_base
             show_base = False
         elif not real_bases:
+            header_base = None
             base_text = 'GIT \u00b7 no base ref'
             show_base = False
         else:
+            header_base = None
             base_text = 'GIT \u00b7 per-repo base'
             show_base = True
-        kind = 'workspace' if model.kind == 'workspace' else 'repo'
+        kind = {'workspace': 'workspace', 'repo': 'repo'}.get(model.kind, 'folder')
         self._content.pack_start(
             self._header(base_text, agent if in_use else None,
                          '%s %s' % (kind, _short_path(model.path))),
             False, False, 0)
-        if not model.repos:
+        if model.kind == 'none':
+            self._content.pack_start(
+                self._muted('Not a git repository: %s' % _short_path(model.path)), False, False, 0)
+        elif not model.repos:
             self._content.pack_start(Gtk.Label(label='no git repositories found', xalign=0),
                                      False, False, 0)
         for i, repo in enumerate(model.repos):
             self._content.pack_start(self._repo_card(repo, in_use, i == 0, show_base, agent),
                                      False, False, 0)
+        if external:
+            section = self._muted('%s also works in' % agent)
+            section.get_style_context().add_class('gg-header')
+            section.set_margin_top(6)
+            self._content.pack_start(section, False, False, 0)
+            for repo in external:
+                self._content.pack_start(
+                    self._repo_card(repo, in_use, False, repo.base != header_base, agent),
+                    False, False, 0)
         self._last_key = key
         self._style_tree(self._content)
         self._content.show_all()
+
+    @staticmethod
+    def _muted(text):
+        label = Gtk.Label(label=text, xalign=0)
+        label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        label.get_style_context().add_class('gg-muted')
+        return label
 
     def _update_max_height(self):
         height = self._term.get_allocated_height()

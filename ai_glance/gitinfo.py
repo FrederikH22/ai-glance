@@ -221,3 +221,42 @@ def build_model(cwd: Path, timeout: float = 2.0) -> PanelModel:
         return PanelModel("none", cwd, ())
     except Exception:
         return PanelModel("none", Path(cwd), ())
+
+
+MAX_EXTERNAL_REPOS = 6
+
+
+def external_repos(paths, covered, limit: int = MAX_EXTERNAL_REPOS,
+                   timeout: float = 2.0) -> tuple[RepoState, ...]:
+    """Repositories an agent works in outside the panel's own repos: for each of
+    ``paths`` the enclosing git checkout (via its nearest existing directory), skipping
+    checkouts inside any ``covered`` worktree and repos already shown. One RepoState per
+    repository (``current`` = the first touched worktree), sorted by name, at most
+    ``limit``. Never raises."""
+    try:
+        covered = [Path(c) for c in covered]
+        tops: dict[Path, None] = {}
+        seen_dirs: dict[Path, Path | None] = {}
+        for p in paths:
+            d = Path(p)
+            while not _isdir(d) and d != d.parent:
+                d = d.parent
+            if d not in seen_dirs:
+                top = _find_repo_toplevel(d)
+                seen_dirs[d] = top.resolve() if top is not None else None
+            top = seen_dirs[d]
+            if top is None or any(top == c or c in top.parents for c in covered):
+                continue
+            tops[top] = None
+        repos: dict[Path, RepoState] = {}
+        for top in sorted(tops, key=lambda t: (t.name, str(t))):
+            state = repo_state(top, timeout)
+            if state.error is None and any(state.root == c or c in state.root.parents
+                                           for c in covered):
+                continue
+            repos.setdefault(state.root, state)
+            if len(repos) >= limit:
+                break
+        return tuple(sorted(repos.values(), key=lambda r: (r.name, str(r.root))))
+    except Exception:
+        return ()
