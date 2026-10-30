@@ -87,7 +87,15 @@ def focus(term):
 
 # Fake omp states per shell pid: no real omp runs inside Xvfb.
 STATES = {}
-ompsessions.pane_agent_state = lambda pid, *a, **k: STATES.get(pid)
+TITLES = {}
+
+
+def _fake_state(pid, *a, title=None, **k):
+    TITLES[pid] = title
+    return STATES.get(pid)
+
+
+ompsessions.pane_agent_state = _fake_state
 
 
 def poll():
@@ -121,6 +129,13 @@ check(f'before any state: unfocused header is stock {STOCK} (got {header(term_b)
 STATES.update({term_a.pid: ompsessions.NEEDS_INPUT, term_b.pid: ompsessions.WORKING,
                term_c.pid: ompsessions.NEEDS_INPUT})
 poll()
+# omp writes its run state into the terminal title; the poller must hand it over.
+term_c.vte.feed('\x1b]0;\u03c0 ! ROLE: test\x07'.encode())
+pump(0.3)
+poll()
+check(f'the pane title reaches the state reader ({TITLES.get(term_c.pid)!r})',
+      TITLES.get(term_c.pid) == '\u03c0 ! ROLE: test'
+      and ompsessions.title_state(TITLES[term_c.pid]) == 'blocked')
 GREEN = rgb255(st.WORKING_RGB)
 check(f'working pane header is pastel green {GREEN} (got {header(term_b)})',
       close(header(term_b), GREEN, 8))

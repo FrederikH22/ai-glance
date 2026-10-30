@@ -16,9 +16,11 @@ A Terminator 2.1.3 plugin for working with AI coding agents (omp) across git wor
 - **Active pane**: animated colour gradient on its header and a 3 px frame in the same
   gradient (stock colours while broadcasting).
 - **Unfocused panes running omp or Claude Code**: pastel green header while the agent is
-  working (turn running, tool in flight, subagents/background agents running), pulsing
-  orange while it waits for your input (turn over, `ask` or permission prompt open).
-  Panes without an agent keep the stock header.
+  working (turn running, tool in flight, or background agents/jobs still running after the
+  turn), pulsing orange while it waits for your input (turn over, `ask`, approval or
+  permission prompt open). omp's state comes from the run-state mark it writes into the
+  terminal title (`π ⠋` / `π >` / `π !`, omp's `tui.titleState`, on by default) plus its
+  session log for background jobs. Panes without an agent keep the stock header.
 
 ## Screenshots
 

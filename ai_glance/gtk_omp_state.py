@@ -154,7 +154,9 @@ def _poll():
         if _poll_in_flight:
             return True
         from terminatorlib.terminator import Terminator
-        panes = [(t.titlebar, t.pid) for t in list(Terminator().terminals)
+        # The VTE title is read here, on the GTK thread: omp writes its run state into it.
+        panes = [(t.titlebar, t.pid, t.vte.get_window_title())
+                 for t in list(Terminator().terminals)
                  if getattr(t, 'titlebar', None) is not None]
         if not panes and not _stateful:
             return True
@@ -168,7 +170,8 @@ def _poll():
 
 
 def _read_states(panes):
-    results = [(titlebar, ompsessions.pane_agent_state(pid)) for titlebar, pid in panes]
+    results = [(titlebar, ompsessions.pane_agent_state(pid, title=title))
+               for titlebar, pid, title in panes]
     GLib.idle_add(_apply_states, results)
 
 

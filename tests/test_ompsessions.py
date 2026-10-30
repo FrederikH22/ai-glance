@@ -350,3 +350,70 @@ def test_omp_bash_commands_name_the_worktree(tmp_path):
     assert not any('proc:' in str(p) or 'example.com' in str(p) for p in got)
     assert om.worktrees_in_use(got, [Path('/w/ws'), Path('/w/ws/.worktrees/v2/src/repo')]) == {
         Path('/w/ws'), Path('/w/ws/.worktrees/v2/src/repo')}
+
+
+def test_title_state():
+    assert om.title_state('\u03c0 ! ARM: plan') == 'blocked'
+    assert om.title_state('\u03c0 > ARM: plan') == 'idle'
+    assert om.title_state('\u03c0 \u280b ARM: plan') == 'working'   # spinner frame
+    assert om.title_state('\u03c0 :') == 'working'                   # static host
+    assert om.title_state('\u03c0: label') is None                   # title state disabled
+    assert om.title_state('frederik@host: ~') is None
+    assert om.title_state(None) is None
+
+
+def job_result(tool, text, **details):
+    return {'type': 'message', 'message': {'role': 'toolResult', 'toolName': tool,
+                                           'content': [{'type': 'text', 'text': text}],
+                                           'details': details}}
+
+
+def test_pending_jobs_lifecycle(tmp_path):
+    log = tmp_path / 's.jsonl'
+    events = [
+        job_result('task', 'Spawned 2 background agents using task. - `A` (job `A`) - `B` (job `B`)'),
+        job_result('bash', 'Backgrounded as job bg_1 (killed once it has run 300s in total)'),
+        job_result('bash', 'grep output quoting: Backgrounded as job bg_9 (killed once ...'),  # not a job
+        job_result('wait', '## Completed (1)', jobs=[{'id': 'A', 'label': 'A', 'status': 'completed'},
+                                                    {'id': 'B', 'label': 'B', 'status': 'running'}]),
+    ]
+    write_lines(log, events)
+    assert om.pending_jobs(log) == {'B', 'bg_1'}
+    events += [
+        {'type': 'custom_message', 'customType': 'async-result',
+         'details': {'jobs': [{'jobId': 'bg_1', 'status': 'completed'}]}},
+        job_result('write', 'Queued for A (was parked; revived).',
+                   message={'receipts': [{'to': 'A', 'outcome': 'revived'}]}),
+    ]
+    write_lines(log, events)
+    assert om.pending_jobs(log) == {'A', 'B'}
+    events += [
+        job_result('wait', 'done', jobs=[{'id': 'A-2', 'label': 'A', 'status': 'completed'}]),
+        job_result('write', '## Cancelled (1)\n\n- Cancelled background job B.\n'),
+    ]
+    write_lines(log, events)
+    assert om.pending_jobs(log) == set()
+    write_lines(log, events[:1] + [{'type': 'custom', 'customType': 'session_exit'}])
+    assert om.pending_jobs(log) == set()
+
+
+def test_session_state_uses_omp_title(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [TITLE, USER, assistant('toolUse', 'write'), tool_start('write')])
+    assert om.session_state(log, now=1e12, title='\u03c0 ! X') == om.NEEDS_INPUT  # approval prompt
+    assert om.session_state(log, now=1e12, title='\u03c0 \u280b X') == om.WORKING
+    write_lines(log, [TITLE, USER, job_result('task', 'Spawned agent `S` (job `S`).'),
+                      assistant('stop')])
+    # omp's turn is over ('>') but a background agent still runs: working, not waiting
+    assert om.session_state(log, now=1e12, title='\u03c0 > X') == om.WORKING
+    assert om.session_state(log, now=1e12) == om.WORKING
+    write_lines(log, [TITLE, USER, assistant('stop')])
+    assert om.session_state(log, now=1e12, title='\u03c0 > X') == om.NEEDS_INPUT
+
+
+def test_cfg_write_waits_for_approval_without_title(tmp_path):
+    log = tmp_path / 's.jsonl'
+    start = {'type': 'custom', 'customType': 'tool_execution_start',
+             'data': {'toolName': 'write', 'args': {'path': 'cfg://modelRoles'}}}
+    write_lines(log, [TITLE, USER, assistant('toolUse', 'write'), start])
+    assert om.session_state(log, now=1e12) == om.NEEDS_INPUT
