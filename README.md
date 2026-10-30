@@ -20,6 +20,41 @@ A Terminator 2.1.3 plugin for working with AI coding agents (omp) across git wor
   orange while it waits for your input (turn over, `ask` or permission prompt open).
   Panes without an agent keep the stock header.
 
+## Screenshots
+
+> **Note:** the terminal background and text colours (dark brown `#1c100a`, amber
+> `#e5c158`) and the font (Ubuntu Sans Mono 13) come from my own custom Terminator
+> profile, not Terminator's defaults. Header colours, git panel and usage bar are the
+> plugin's and look the same with any profile.
+
+Four panes: the active one (top left, `~/ros_ws`) with the animated gradient header and
+frame, omp working in the top right (green header), omp waiting for input in the bottom
+left (orange, pulsing), a plain shell in the bottom right (stock header). Usage bar at the
+bottom.
+
+![Overview](docs/screenshots/overview.png)
+
+Git panel opened with ⎇ in the workspace root: one card per repo under `src/`, with
+branch, ahead (↑) / behind (↓) vs `origin/main` and a dot for uncommitted changes.
+
+![Git panel in a ROS workspace](docs/screenshots/git-panel-workspace.png)
+
+Git panel in a pane running omp: the linked worktree omp edits is listed under its repo,
+and a repo outside the pane's folder appears under "omp also works in".
+
+![Git panel in an omp pane](docs/screenshots/git-panel-agent.png)
+
+Behaviour over 9 s: gradient cycling on the active header, orange pulse on the waiting
+pane, the panel opening and closing, focus moving to the bottom right pane (the gradient
+follows it, the old pane drops back to the stock header).
+
+![Behaviour](docs/screenshots/behaviour.gif)
+
+Repos, usage numbers and agent output are demo data. Regenerate with
+`xvfb-run -a -s '-screen 0 1600x900x24' python3 tools/make_screenshots.py` (real
+Terminator + plugin in a throwaway HOME, your Terminator config copied for the colours;
+agent state and usage are faked, nothing touches `~/.config`, omp or the network).
+
 ## Install / uninstall
 
     bash install.sh              # symlinks into ~/.config/terminator/plugins, enables AiGlance
