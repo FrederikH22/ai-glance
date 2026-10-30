@@ -324,3 +324,29 @@ def test_claude_code_pane_state(tmp_path):
         assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) == want, status
     record.unlink()
     assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) is None
+
+
+def bash_call(t, command):
+    return {'type': 'message', 'timestamp': t,
+            'message': {'role': 'assistant', 'content': [
+                {'type': 'toolCall', 'name': 'bash', 'arguments': {'command': command}}]}}
+
+
+def test_omp_bash_commands_name_the_worktree(tmp_path):
+    log = tmp_path / 's.jsonl'
+    home = str(Path.home())
+    write_lines(log, [
+        {'type': 'session', 'cwd': '/w/ws', 'timestamp': ts(timedelta(hours=1))},
+        bash_call(ts(timedelta(minutes=3)), 'cd /w/ws/.worktrees/v2/src/repo; git log -1'),
+        bash_call(ts(timedelta(minutes=2)),
+                  "git -C ~/other/repo status && curl -s https://example.com/x > /dev/null"),
+        msg(ts(timedelta(minutes=1)), path='proc://bg_5/kill'),           # omp internal URL
+        msg(ts(timedelta(minutes=1)), path='/w/ws/src/a.py:85-113'),      # read selector
+    ])
+    got = om.working_paths(log, NOW)
+    assert Path('/w/ws/.worktrees/v2/src/repo') in got
+    assert Path(home + '/other/repo') in got
+    assert Path('/w/ws/src/a.py') in got
+    assert not any('proc:' in str(p) or 'example.com' in str(p) for p in got)
+    assert om.worktrees_in_use(got, [Path('/w/ws'), Path('/w/ws/.worktrees/v2/src/repo')]) == {
+        Path('/w/ws'), Path('/w/ws/.worktrees/v2/src/repo')}

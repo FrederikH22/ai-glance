@@ -5,6 +5,7 @@ GTK-free and thread-safe: called from worker threads.
 """
 import json
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -59,6 +60,22 @@ def _parse_ts(value) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# Absolute (or ~/) paths inside a shell command; not the path part of a URL (``x://``).
+_CMD_PATH = re.compile(r'''(?<![\w:/.~-])(~?/[^\s'"`;|&<>(){}$*?\[\]]+)''')
+_URL = re.compile(r'^[A-Za-z][\w+.-]*:')  # proc://…, https://…, skill://…
+
+
+def command_paths(command: str) -> list:
+    """Absolute paths mentioned in a shell command (``cd X; …``, ``git -C X``, …).
+    omp records no cwd for its bash calls, so this is where it says where it works."""
+    home = str(Path.home())
+    out = []
+    for m in _CMD_PATH.finditer(command):
+        p = m.group(1)
+        out.append(home + p[1:] if p.startswith('~') else p)
+    return out
+
+
 def _line_paths(obj: dict, cwd: Optional[str]) -> list:
     """Raw path strings referenced by one JSONL record (omp or Claude Code)."""
     out = []
@@ -71,13 +88,13 @@ def _line_paths(obj: dict, cwd: Optional[str]) -> list:
             for item in content:
                 if not isinstance(item, dict):
                     continue
-                args = item.get('arguments')  # omp tool call
-                if isinstance(args, dict):
-                    out += [args.get('path'), args.get('cwd')]
-                tool_input = item.get('input')  # Claude Code tool_use
-                if isinstance(tool_input, dict):
-                    out += [tool_input.get('file_path'), tool_input.get('path'),
-                            tool_input.get('notebook_path')]
+                for args in (item.get('arguments'), item.get('input')):  # omp / Claude Code
+                    if not isinstance(args, dict):
+                        continue
+                    out += [args.get('path'), args.get('cwd'), args.get('file_path'),
+                            args.get('notebook_path')]
+                    if isinstance(args.get('command'), str):
+                        out += command_paths(args['command'])
         details = message.get('details')
         if isinstance(details, dict):
             out += [details.get('cwd'), details.get('path')]
@@ -87,8 +104,11 @@ def _line_paths(obj: dict, cwd: Optional[str]) -> list:
             continue
         for part in p.split(';'):  # omp grep/glob take ';'-separated lists
             part = part.strip()
-            if not part:
+            if not part or _URL.match(part):
                 continue
+            head, sep, tail = part.rpartition('/')
+            if ':' in tail:  # omp read selectors: file.py:10-20, file.py:conflicts
+                part = head + sep + tail.split(':', 1)[0]
             path = Path(part)
             if not path.is_absolute():
                 if not cwd:
