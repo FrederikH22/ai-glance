@@ -492,7 +492,10 @@ def _finish(pending: dict, names: set) -> None:
         del pending[k]
 
 
+_CODE_BLOCK = re.compile(r'```.*?(?:```|\Z)', re.DOTALL)
 _CODE_SPAN = re.compile(r'`[^`\n]*`')
+_URL = re.compile(r'\b[a-z][a-z0-9+.-]*://\S+', re.IGNORECASE)
+_QUESTION_END = re.compile(r'\?(?=[\s"\')\]*_]|$)')
 _ASK_PHRASES = re.compile(
     r"\b(tell me|let me know|should i|shall i|do you want|want me to|would you like|"
     r"your call|which (one|option|do you)|please (confirm|decide|choose|check|answer))\b",
@@ -501,17 +504,21 @@ _ASK_PHRASES = re.compile(
 
 def asks_user(text: Optional[str]) -> bool:
     """True when an agent's final message hands something to the user: a question or an
-    explicit request in its last two paragraphs (recap lines and code spans ignored)."""
+    explicit request in its last two paragraphs (recap lines, fenced code blocks, URLs and
+    code spans ignored; a ``?`` counts only at the end of a sentence)."""
     if not text:
         return False
+    text = _URL.sub('', _CODE_BLOCK.sub('', text))
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
     paragraphs = [p for p in paragraphs if not p.startswith('\u203b')]  # omp recap
     tail = _CODE_SPAN.sub('', '\n'.join(paragraphs[-2:]))
-    return '?' in tail or bool(_ASK_PHRASES.search(tail))
+    return bool(_QUESTION_END.search(tail) or _ASK_PHRASES.search(tail))
 
 
-def last_assistant_text(log: Path, tail_bytes: int = 256 * 1024) -> Optional[str]:
-    """Text of the newest assistant message with text in an omp or Claude Code log."""
+def last_turn_end(log: Path, tail_bytes: int = 256 * 1024) -> tuple:
+    """(text, errored) of the log's last turn: the newest assistant message with text, looking
+    back no further than the newest user message, and whether the newest assistant message
+    ended in an error (omp ``stopReason: error``, Claude Code ``isApiErrorMessage``)."""
     with open(log, 'rb') as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
@@ -519,29 +526,46 @@ def last_assistant_text(log: Path, tail_bytes: int = 256 * 1024) -> Optional[str
         lines = f.read().split(b'\n')
     if size > tail_bytes:
         lines = lines[1:]
+    errored = None
     for raw in reversed(lines):
-        if b'assistant' not in raw:
+        if b'"role"' not in raw:
             continue
         try:
             obj = json.loads(raw)
         except ValueError:
             continue
         msg = obj.get('message') if isinstance(obj, dict) else None
-        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+        if not isinstance(msg, dict):
             continue
+        if msg.get('role') == 'user':
+            break
+        if msg.get('role') != 'assistant':
+            continue
+        if errored is None:
+            errored = (msg.get('stopReason') == 'error' or obj.get('isApiErrorMessage') is True
+                       or msg.get('isApiErrorMessage') is True)
         content = msg.get('content')
         if isinstance(content, str):
             text = content
         else:
             text = '\n\n'.join(c.get('text', '') for c in content or []
-                               if isinstance(c, dict) and c.get('type') == 'text')
+                                if isinstance(c, dict) and c.get('type') == 'text')
         if text.strip():
-            return text
-    return None
+            return text, bool(errored)
+    return None, bool(errored)
+
+
+def last_assistant_text(log: Path, tail_bytes: int = 256 * 1024) -> Optional[str]:
+    """Text of the newest assistant message with text in an omp or Claude Code log (None
+    when the last turn has none)."""
+    return last_turn_end(log, tail_bytes)[0]
 
 
 def _turn_over_state(log: Path) -> str:
-    return NEEDS_INPUT if asks_user(last_assistant_text(log)) else DONE
+    """After a finished turn: NEEDS_INPUT when it ended in an error (the agent stopped
+    mid-task and waits for a retry) or its last message asks the user something."""
+    text, errored = last_turn_end(log)
+    return NEEDS_INPUT if errored or asks_user(text) else DONE
 
 
 _TITLE_RE = re.compile(r'^\u03c0 (\S+)(?: |$)')
@@ -595,7 +619,8 @@ def session_state(log: Path, now: Optional[float] = None,
                 calls = [c.get('name') for c in msg.get('content') or []
                          if isinstance(c, dict) and c.get('type') == 'toolCall']
                 return NEEDS_INPUT if 'ask' in calls else WORKING
-            # Turn over (stop/error/aborted): background jobs may still run.
+            # Turn over (stop/error/aborted): background jobs may still run; an error ends
+            # in NEEDS_INPUT (see _turn_over_state).
             if pending_jobs(log, now, since) or _subagents_active(log, now):
                 return WORKING
             return _turn_over_state(log)

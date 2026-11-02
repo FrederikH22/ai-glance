@@ -214,7 +214,8 @@ def test_session_state_from_last_turn_event(tmp_path):
         ([TITLE, USER, assistant('toolUse', 'bash'), tool_start('bash'), RESULT], om.WORKING),
         ([TITLE, USER, assistant('stop')], om.DONE),                   # turn over, nothing asked
         ([TITLE, USER, assistant('stop', text='Should I push it?')], om.NEEDS_INPUT),
-        ([TITLE, USER, assistant('error')], om.DONE),
+        ([TITLE, USER, assistant('error')], om.NEEDS_INPUT),          # errored: waits for a retry
+        ([TITLE, USER, assistant('error', text='')], om.NEEDS_INPUT),
         ([TITLE, USER, assistant('aborted')], om.DONE),
         ([TITLE, USER, assistant('toolUse', 'ask'), tool_start('ask')], om.NEEDS_INPUT),
         ([TITLE, USER, assistant('stop'), {'type': 'title_change'},
@@ -434,6 +435,15 @@ def test_asks_user():
     assert om.asks_user('If you want it reopened, let me know.')
     assert not om.asks_user('')
     assert not om.asks_user(None)
+    # false positives: fenced code, URLs, '?' inside words and commands
+    assert not om.asks_user('Done.\n\n```rust\nlet x = parse(s)?;\n\nlet y = f()?;\n```')
+    assert not om.asks_user('Done.\n\n```sh\necho $?\n\nexit 1\n```\n\nAll green.')
+    assert not om.asks_user('See https://example.invalid/page?id=42 for the details.')
+    assert not om.asks_user('Fixed and pushed.\n\nhttps://example.invalid/a?b=1&c=2')
+    assert not om.asks_user('Use foo?bar syntax here.')
+    assert om.asks_user('Done.\n\n```sh\nls\n```\n\nShall it go out today?')
+    assert om.asks_user('Is it "done"?')
+    assert om.asks_user('Is it done (really)?')
 
 
 def test_last_assistant_text_omp_and_claude(tmp_path):
@@ -445,6 +455,67 @@ def test_last_assistant_text_omp_and_claude(tmp_path):
     write_lines(claude, [{'type': 'assistant', 'message': {'role': 'assistant', 'content': [
         {'type': 'text', 'text': 'Want me to push?'}, {'type': 'tool_use', 'name': 'Bash'}]}}])
     assert om.last_assistant_text(claude) == 'Want me to push?'
+
+
+def test_last_assistant_text_stops_at_the_newest_user_message(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [USER, assistant('stop', text='Why did it fail?'), USER,
+                      assistant('toolUse', 'bash', text=''), RESULT, assistant('stop', text='')])
+    assert om.last_assistant_text(log) is None
+    assert om.session_state(log, now=1e12) == om.DONE
+
+
+def test_error_turn_is_needs_input_also_via_title(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [TITLE, USER, assistant('error', text='')])
+    assert om.session_state(log, now=1e12, title='\u03c0 > x') == om.NEEDS_INPUT
+    write_lines(log, [TITLE, USER, assistant('stop', text='Done.')])
+    assert om.session_state(log, now=1e12, title='\u03c0 > x') == om.DONE
+
+
+def test_claude_api_error_is_needs_input(tmp_path):
+    claude = tmp_path / 'c.jsonl'
+    write_lines(claude, [
+        {'type': 'user', 'message': {'role': 'user', 'content': 'go'}},
+        {'type': 'assistant', 'isApiErrorMessage': True,
+         'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Rate limited.'}]}}])
+    assert om.last_turn_end(claude) == ('Rate limited.', True)
+    write_lines(claude, [
+        {'type': 'user', 'message': {'role': 'user', 'content': 'go'}},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'text', 'text': 'Done.'}]}}])
+    assert om.last_turn_end(claude) == ('Done.', False)
+
+
+def test_process_start_and_since_from_fake_proc(tmp_path):
+    proc = tmp_path / 'proc'
+    (proc / '42').mkdir(parents=True)
+    ticks = os.sysconf('SC_CLK_TCK')
+    # field 22 (starttime) is index 19 after the ')' of the comm field (which may hold spaces)
+    rest = ['S'] + ['0'] * 18 + [str(5 * ticks)] + ['0'] * 5
+    (proc / '42' / 'stat').write_text('42 (my (agent)) ' + ' '.join(rest) + '\n')
+    (proc / 'stat').write_text('cpu 1 2 3\nbtime 1000\n')
+    assert om._process_start(42, proc) == 1005
+    assert om._process_start(43, proc) is None
+    (proc / 'stat').write_text('cpu 1 2 3\n')
+    assert om._process_start(42, proc) is None
+
+
+def test_pane_agent_state_passes_the_process_start_as_since(tmp_path, monkeypatch):
+    proc, sessions = tmp_path / 'proc', tmp_path / 'sessions'
+    make_proc(proc, 100, '/dev/pts/7', ['bash'])
+    make_proc(proc, 200, '/dev/pts/7', ['bun', '/home/u/.bun/bin/omp'])
+    log = tmp_path / 'log.jsonl'
+    write_lines(log, [TITLE, USER, assistant('stop')])
+    sessions.mkdir()
+    (sessions / 'pts-7').write_text(f'/w\n{log}\n')
+    ticks = os.sysconf('SC_CLK_TCK')
+    (proc / '200' / 'stat').write_text('200 (bun) S ' + ' '.join(['0'] * 18 + [str(3 * ticks)] + ['0'] * 5) + '\n')
+    (proc / 'stat').write_text('btime 2000\n')
+    seen = []
+    monkeypatch.setattr(om, 'session_state', lambda *a, **k: seen.append(k.get('since')) or om.DONE)
+    assert om.pane_agent_state(100, proc, sessions) == om.DONE
+    assert seen == [2003]
 
 
 def stamped(record, when):
