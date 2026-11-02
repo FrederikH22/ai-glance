@@ -1,9 +1,10 @@
 """Colour the headers of unfocused panes by the state of the coding agent (omp or
 Claude Code) running in them.
 
-- agent working (turn running, tool in flight, subagents/background agents running):
-  pastel green
-- agent waiting for the user (turn over, ``ask``/permission prompt open): pulsing orange
+- agent working (turn running, tool in flight, background jobs running) or done (turn
+  over, nothing running, and its last message asks you nothing): pastel green
+- agent waiting for you (``ask``/approval/permission prompt open, or its last message
+  asks you something): pulsing orange
 - no live agent in the pane: stock colours, untouched
 
 The focused pane keeps ``gtk_titlebar_color``'s gradient; this module never paints
@@ -44,7 +45,7 @@ _poll_in_flight = False
 
 def state_rgb(state, now=None):
     """Header colour for ``state`` at ``now`` (monotonic seconds); None = stock."""
-    if state == ompsessions.WORKING:
+    if state in (ompsessions.WORKING, ompsessions.DONE):
         return WORKING_RGB
     if state == ompsessions.NEEDS_INPUT:
         now = time.monotonic() if now is None else now

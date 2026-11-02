@@ -103,8 +103,11 @@ def poll():
     pump(0.6)
 
 
+# Panes start in '/', so their titles stay short and never cover the sampled header pixel
+# (a long checkout path would, e.g. when run from a git worktree).
+os.chdir('/')
 terminator = Terminator()
-terminator.set_origcwd(os.getcwd())
+terminator.set_origcwd('/')
 terminator.reconfigure()
 window, term_a = terminator.new_window()
 window.resize(1200, 600)
