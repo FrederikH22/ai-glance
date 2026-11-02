@@ -286,7 +286,7 @@ def test_claude_code_pane_worktrees(tmp_path):
     make_proc(proc, 200, '/dev/pts/9', ['bash'])
     make_proc(proc, 300, '/dev/pts/9', ['claude', '--resume', 'sid-1'])
     trees = [Path('/w/a'), Path('/w/b'), Path('/w/c'), Path('/w/old')]
-    assert om.pane_agent(200, proc, tmp_path / 'none', claude)[:2] == (om.CLAUDE, log)
+    assert om.pane_agent(200, proc, tmp_path / 'none', claude) == (om.CLAUDE, log, None, 300)
     assert in_use(200, trees, NOW, proc, tmp_path / 'none',
                                     claude_dir=claude) == {Path('/w/a'), Path('/w/b'), Path('/w/c')}
     # no session record for that pid -> no agent, no worktrees

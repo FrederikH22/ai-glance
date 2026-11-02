@@ -300,7 +300,7 @@ def claude_session_log(pid: int, claude_dir: Path = CLAUDE_DIR) -> Optional[Path
 def pane_agent(shell_pid: Optional[int], proc: Path = Path('/proc'),
                sessions_dir: Path = TERMINAL_SESSIONS,
                claude_dir: Path = CLAUDE_DIR) -> Optional[tuple]:
-    """(agent name, session log, fallback cwd) of the agent running in this pane,
+    """(agent name, session log, fallback cwd, agent pid) of the agent running in this pane,
     or None. Never raises."""
     try:
         tty = pane_tty(shell_pid, proc)
@@ -312,7 +312,7 @@ def pane_agent(shell_pid: Optional[int], proc: Path = Path('/proc'),
             log, cwd = session_log_for_tty(tty, sessions_dir), session_cwd_for_tty(tty, sessions_dir)
         else:
             log, cwd = claude_session_log(pid, claude_dir), None
-        return (name, log, cwd) if log is not None else None
+        return (name, log, cwd, pid) if log is not None else None
     except Exception:  # noqa: BLE001 - contract: never raises
         return None
 
@@ -331,7 +331,7 @@ def pane_agent_paths(shell_pid: Optional[int], now: datetime,
         agent = pane_agent(shell_pid, proc, sessions_dir, claude_dir)
         if agent is None:
             return None, set()
-        name, log, cwd = agent
+        name, log, cwd, _pid = agent
         return name, working_paths(log, now, base_cwd=cwd, errors=errors)
     except Exception as exc:
         if errors is not None:
