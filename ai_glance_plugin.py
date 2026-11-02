@@ -44,3 +44,8 @@ class AiGlance(plugin.Plugin):
             gtk_window_title.install()
         except Exception as exc:
             err('ai-glance: window title install failed: %r' % (exc,))
+        try:
+            from ai_glance import gtk_session_restore
+            gtk_session_restore.install()
+        except Exception as exc:
+            err('ai-glance: session restore install failed: %r' % (exc,))
