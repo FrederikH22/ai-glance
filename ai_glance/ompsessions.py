@@ -341,8 +341,9 @@ def pane_agent_paths(shell_pid: Optional[int], now: datetime,
 
 # --- session state -------------------------------------------------------------
 
-WORKING = 'working'  # agent turn running, a tool in flight, or subagents still writing
-NEEDS_INPUT = 'input'  # turn ended (or an `ask` is open): omp waits for the user
+WORKING = 'working'  # agent turn running, a tool in flight, or background jobs still running
+NEEDS_INPUT = 'input'  # waits for the user: ask / approval prompt, or the turn ended on a question
+DONE = 'done'  # turn over, nothing running, and the agent asked the user nothing
 STATE_TAIL_BYTES = 64 * 1024
 SUBAGENT_ACTIVE_S = 20
 _SKIP_TYPES = {'title', 'title_change', 'credential_pin', 'model_change',
@@ -381,10 +382,12 @@ def _subagents_active(log: Path, now: float) -> bool:
 
 
 _JOB_MARKERS = (b'"jobs"', b'(job `', b'Backgrounded as job', b'revived', b'session_exit',
-                b'Cancelled background job')
+                b'Cancelled background job', b'not found: ')
 _SPAWN_RE = re.compile(r'\(job `([^`]+)`\)')
 _BACKGROUND_RE = re.compile(r'Backgrounded as job (\S+?)[;.,\s]')
+_DEADLINE_RE = re.compile(r'killed once it has run (\d+)s in total')
 _CANCEL_RE = re.compile(r'Cancelled background job (\S+?)[;.,\s]')
+_NOT_FOUND_RE = re.compile(r'^Background job or service not found: (\S+?)[;.,\s]')
 _jobs_cache: dict = {}
 
 
@@ -395,17 +398,37 @@ def _message_text(msg: dict) -> str:
     return ' '.join(c.get('text', '') for c in content or [] if isinstance(c, dict))
 
 
-def pending_jobs(log: Path) -> set:
+def _ts(obj: dict) -> Optional[float]:
+    when = _parse_ts(obj.get('timestamp'))
+    return when.timestamp() if when else None
+
+
+def pending_jobs(log: Path, now: Optional[float] = None, since: Optional[float] = None) -> set:
     """Background jobs (subagents, backgrounded shell commands) the session started and
     that have not finished yet. omp reports every job as spawned / backgrounded /
     revived, and every job snapshot (``wait`` results, delivered async results) lists
-    the tracked jobs with their status; ``session_exit`` ends them all."""
+    the tracked jobs with their status; ``session_exit`` ends them all.
+
+    Jobs live in the omp process: one started before ``since`` (the current omp
+    process's start time) is gone, a backgrounded command past its ``killed once it has
+    run Ns`` deadline is gone, and so is one omp reported as ``not found``."""
+    now = time.time() if now is None else now
     st = log.stat()
     key = (str(log), st.st_size, st.st_mtime_ns)
     hit = _jobs_cache.get(str(log))
     if hit is not None and hit[0] == key:
-        return set(hit[1])
-    pending: dict = {}  # id -> label
+        jobs = hit[1]
+    else:
+        jobs = _scan_jobs(log)
+        _jobs_cache[str(log)] = (key, jobs)
+    return {job for job, (_label, started, deadline) in jobs.items()
+            if (deadline is None or now < deadline)
+            and (since is None or started is None or started >= since)}
+
+
+def _scan_jobs(log: Path) -> dict:
+    """job id -> (label, started epoch or None, deadline epoch or None)."""
+    pending: dict = {}
     with open(log, 'rb') as f:
         for raw in f:
             if not any(m in raw for m in _JOB_MARKERS):
@@ -419,7 +442,10 @@ def pending_jobs(log: Path) -> set:
             if obj.get('type') == 'custom' and obj.get('customType') == 'session_exit':
                 pending.clear()
                 continue
+            when = _ts(obj)
             msg = obj.get('message') if isinstance(obj.get('message'), dict) else {}
+            when = when if when is not None else (
+                msg.get('timestamp') / 1000 if isinstance(msg.get('timestamp'), (int, float)) else None)
             details = obj.get('details') if isinstance(obj.get('details'), dict) else \
                 msg.get('details') if isinstance(msg.get('details'), dict) else {}
             if msg.get('role') == 'toolResult':
@@ -430,35 +456,92 @@ def pending_jobs(log: Path) -> set:
                 tool = msg.get('toolName')
                 if tool == 'task' and head.startswith('Spawned'):
                     for job in _SPAWN_RE.findall(head):
-                        pending[job] = job
+                        pending[job] = (job, when, None)
                 if tool == 'bash' and head.startswith('Backgrounded'):
                     for job in _BACKGROUND_RE.findall(head + ' ')[:1]:
-                        pending[job] = job
+                        limit = _DEADLINE_RE.search(head)
+                        deadline = when + int(limit.group(1)) if limit and when else None
+                        pending[job] = (job, when, deadline)
                 if head.startswith('## Cancelled'):
                     for job in _CANCEL_RE.findall(head + ' '):
                         _finish(pending, {job})
+                for job in _NOT_FOUND_RE.findall(head + ' '):
+                    _finish(pending, {job})
                 receipts = (details.get('message') or {}).get('receipts') \
                     if isinstance(details.get('message'), dict) else None
                 for r in receipts or ():
                     if isinstance(r, dict) and r.get('outcome') == 'revived' and r.get('to'):
-                        pending[r['to']] = r['to']
+                        pending[r['to']] = (r['to'], when, None)
             for job in details.get('jobs') or ():
                 job_id = job.get('id') or job.get('jobId') if isinstance(job, dict) else None
                 if not job_id:
                     continue
                 if job.get('status') == 'running':
-                    pending[job_id] = job.get('label') or job_id
+                    old = pending.get(job_id)
+                    pending[job_id] = (job.get('label') or job_id,
+                                       old[1] if old else when, old[2] if old else None)
                 else:
                     _finish(pending, {job_id, job.get('label'), job.get('agentId')} - {None})
-    _jobs_cache[str(log)] = (key, set(pending))
-    return set(pending)
+    return pending
 
 
 def _finish(pending: dict, names: set) -> None:
     """Drop jobs known by any of ``names`` (job id, label or agent id; a revived agent
     gets a new job id such as ``Name-2`` but keeps its label)."""
-    for k in [k for k, label in pending.items() if k in names or label in names]:
+    for k in [k for k, v in pending.items() if k in names or v[0] in names]:
         del pending[k]
+
+
+_CODE_SPAN = re.compile(r'`[^`\n]*`')
+_ASK_PHRASES = re.compile(
+    r"\b(tell me|let me know|should i|shall i|do you want|want me to|would you like|"
+    r"your call|which (one|option|do you)|please (confirm|decide|choose|check|answer))\b",
+    re.IGNORECASE)
+
+
+def asks_user(text: Optional[str]) -> bool:
+    """True when an agent's final message hands something to the user: a question or an
+    explicit request in its last two paragraphs (recap lines and code spans ignored)."""
+    if not text:
+        return False
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
+    paragraphs = [p for p in paragraphs if not p.startswith('\u203b')]  # omp recap
+    tail = _CODE_SPAN.sub('', '\n'.join(paragraphs[-2:]))
+    return '?' in tail or bool(_ASK_PHRASES.search(tail))
+
+
+def last_assistant_text(log: Path, tail_bytes: int = 256 * 1024) -> Optional[str]:
+    """Text of the newest assistant message with text in an omp or Claude Code log."""
+    with open(log, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - tail_bytes))
+        lines = f.read().split(b'\n')
+    if size > tail_bytes:
+        lines = lines[1:]
+    for raw in reversed(lines):
+        if b'assistant' not in raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        msg = obj.get('message') if isinstance(obj, dict) else None
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if isinstance(content, str):
+            text = content
+        else:
+            text = '\n\n'.join(c.get('text', '') for c in content or []
+                               if isinstance(c, dict) and c.get('type') == 'text')
+        if text.strip():
+            return text
+    return None
+
+
+def _turn_over_state(log: Path) -> str:
+    return NEEDS_INPUT if asks_user(last_assistant_text(log)) else DONE
 
 
 _TITLE_RE = re.compile(r'^\u03c0 (\S+)(?: |$)')
@@ -476,12 +559,13 @@ def title_state(title: Optional[str]) -> Optional[str]:
 
 
 def session_state(log: Path, now: Optional[float] = None,
-                  title: Optional[str] = None) -> Optional[str]:
-    """WORKING, NEEDS_INPUT, or None (no events / session exited).
+                  title: Optional[str] = None, since: Optional[float] = None) -> Optional[str]:
+    """WORKING, NEEDS_INPUT, DONE, or None (no events / session exited).
 
-    ``title`` is the pane's terminal title; when it carries omp's run state it decides
-    (an idle omp with background jobs still running counts as WORKING). Otherwise the
-    newest log event decides."""
+    ``title`` is the pane's terminal title; when it carries omp's run state it decides.
+    A finished turn is WORKING while background jobs run, NEEDS_INPUT when the agent's
+    last message asks the user something, else DONE. ``since`` is the omp process's
+    start time (jobs from an earlier process are gone)."""
     now = time.time() if now is None else now
     from_title = title_state(title)
     if from_title == 'blocked':
@@ -489,7 +573,7 @@ def session_state(log: Path, now: Optional[float] = None,
     if from_title == 'working':
         return WORKING
     if from_title == 'idle':
-        return WORKING if pending_jobs(log) else NEEDS_INPUT
+        return WORKING if pending_jobs(log, now, since) else _turn_over_state(log)
     event = _last_event(log)
     if event is None:
         return None
@@ -512,22 +596,45 @@ def session_state(log: Path, now: Optional[float] = None,
                          if isinstance(c, dict) and c.get('type') == 'toolCall']
                 return NEEDS_INPUT if 'ask' in calls else WORKING
             # Turn over (stop/error/aborted): background jobs may still run.
-            return WORKING if pending_jobs(log) or _subagents_active(log, now) else NEEDS_INPUT
+            if pending_jobs(log, now, since) or _subagents_active(log, now):
+                return WORKING
+            return _turn_over_state(log)
     return WORKING  # user message, tool result, delivered job result: a turn is running
 
 
-_CLAUDE_STATES = {'busy': WORKING, 'waiting': NEEDS_INPUT, 'idle': NEEDS_INPUT}
+_CLAUDE_STATES = {'busy': WORKING, 'waiting': NEEDS_INPUT}
 
 
 def claude_state(pid: int, claude_dir: Path = CLAUDE_DIR) -> Optional[str]:
     """State of the Claude Code process ``pid`` from ``sessions/<pid>.json``: ``busy``
-    (a turn or background agents running) is WORKING; ``waiting`` (permission prompt
-    and the like) and ``idle`` (turn over) are NEEDS_INPUT."""
+    (a turn or background agents running) is WORKING; ``waiting`` (permission prompt and
+    the like) is NEEDS_INPUT; ``idle`` (turn over) is NEEDS_INPUT when its last message
+    asks the user something, else DONE."""
     try:
-        status = json.loads((claude_dir / 'sessions' / f'{pid}.json').read_text()).get('status')
+        record = json.loads((claude_dir / 'sessions' / f'{pid}.json').read_text())
+        status = record.get('status')
     except (OSError, ValueError, AttributeError):
         return None
+    if status == 'idle':
+        log = claude_session_log(pid, claude_dir)
+        try:
+            return _turn_over_state(log) if log is not None else DONE
+        except OSError:
+            return DONE
     return _CLAUDE_STATES.get(status)
+
+
+def _process_start(pid: int, proc: Path) -> Optional[float]:
+    """Start time of ``pid`` as epoch seconds, from /proc (None if unknown)."""
+    try:
+        fields = (proc / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+        ticks = int(fields[19])
+        for line in (proc / 'stat').read_text().splitlines():
+            if line.startswith('btime '):
+                return int(line.split()[1]) + ticks / os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
 
 
 def pane_agent_state(shell_pid: Optional[int], proc: Path = Path('/proc'),
@@ -549,6 +656,6 @@ def pane_agent_state(shell_pid: Optional[int], proc: Path = Path('/proc'),
         log = session_log_for_tty(tty, sessions_dir)
         if log is None or not log.exists():
             return None
-        return session_state(log, now, title)
+        return session_state(log, now, title, since=_process_start(pid, proc))
     except Exception:  # noqa: BLE001 - contract: never raises
         return None

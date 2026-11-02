@@ -191,8 +191,8 @@ def test_parse_failure_is_reported_not_raised(tmp_path, monkeypatch):
 
 # --- session state -------------------------------------------------------------
 
-def assistant(stop, *tools):
-    content = [{'type': 'text', 'text': 'hi'}] + [{'type': 'toolCall', 'name': t} for t in tools]
+def assistant(stop, *tools, text='hi'):
+    content = [{'type': 'text', 'text': text}] + [{'type': 'toolCall', 'name': t} for t in tools]
     return {'type': 'message', 'message': {'role': 'assistant', 'stopReason': stop,
                                            'content': content}}
 
@@ -212,12 +212,13 @@ def test_session_state_from_last_turn_event(tmp_path):
         ([TITLE, USER], om.WORKING),                                   # model is thinking
         ([TITLE, USER, assistant('toolUse', 'bash'), tool_start('bash')], om.WORKING),
         ([TITLE, USER, assistant('toolUse', 'bash'), tool_start('bash'), RESULT], om.WORKING),
-        ([TITLE, USER, assistant('stop')], om.NEEDS_INPUT),            # turn over
-        ([TITLE, USER, assistant('error')], om.NEEDS_INPUT),
-        ([TITLE, USER, assistant('aborted')], om.NEEDS_INPUT),
+        ([TITLE, USER, assistant('stop')], om.DONE),                   # turn over, nothing asked
+        ([TITLE, USER, assistant('stop', text='Should I push it?')], om.NEEDS_INPUT),
+        ([TITLE, USER, assistant('error')], om.DONE),
+        ([TITLE, USER, assistant('aborted')], om.DONE),
         ([TITLE, USER, assistant('toolUse', 'ask'), tool_start('ask')], om.NEEDS_INPUT),
         ([TITLE, USER, assistant('stop'), {'type': 'title_change'},
-          {'type': 'custom', 'customType': 'todo_hud_state'}], om.NEEDS_INPUT),  # bookkeeping skipped
+          {'type': 'custom', 'customType': 'todo_hud_state'}], om.DONE),  # bookkeeping skipped
         ([TITLE, USER, assistant('stop'), {'type': 'custom', 'customType': 'session_exit'}], None),
         ([TITLE], None),
     ]
@@ -233,13 +234,13 @@ def test_turn_over_but_subagents_writing_counts_as_working(tmp_path):
     write_lines(sub, [USER])
     now = sub.stat().st_mtime
     assert om.session_state(log, now=now + 1) == om.WORKING
-    assert om.session_state(log, now=now + om.SUBAGENT_ACTIVE_S + 1) == om.NEEDS_INPUT
+    assert om.session_state(log, now=now + om.SUBAGENT_ACTIVE_S + 1) == om.DONE
 
 
 def test_session_state_tail_cut_and_half_written_line(tmp_path, monkeypatch):
     monkeypatch.setattr(om, 'STATE_TAIL_BYTES', 300)
     log = tmp_path / 's.jsonl'
-    write_lines(log, [TITLE] + [RESULT] * 20 + [assistant('stop')])
+    write_lines(log, [TITLE] + [RESULT] * 20 + [assistant('stop', text='Want me to merge?')])
     with open(log, 'a') as f:
         f.write('{"type": "message", "mess')  # being written right now
     assert om.session_state(log, now=1e12) == om.NEEDS_INPUT
@@ -256,7 +257,7 @@ def test_pane_agent_state_needs_live_omp(tmp_path):
     make_proc(proc, 100, '/dev/pts/7', ['bash'])
     assert om.pane_agent_state(100, proc, sessions) is None      # stale pts file, no omp
     make_proc(proc, 101, '/dev/pts/7', ['bun', '/x/omp'])
-    assert om.pane_agent_state(100, proc, sessions, now=1e12) == om.NEEDS_INPUT
+    assert om.pane_agent_state(100, proc, sessions, now=1e12) == om.DONE
     assert om.pane_agent_state(None, proc, sessions) is None
 
 
@@ -319,7 +320,7 @@ def test_claude_code_pane_state(tmp_path):
     make_proc(proc, 300, '/dev/pts/9', ['claude'])
     record = claude / 'sessions' / '300.json'
     for status, want in (('busy', om.WORKING), ('waiting', om.NEEDS_INPUT),
-                         ('idle', om.NEEDS_INPUT), ('something-new', None)):
+                         ('idle', om.DONE), ('something-new', None)):
         record.write_text(json.dumps({'pid': 300, 'sessionId': 's', 'status': status}))
         assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) == want, status
     record.unlink()
@@ -408,6 +409,8 @@ def test_session_state_uses_omp_title(tmp_path):
     assert om.session_state(log, now=1e12, title='\u03c0 > X') == om.WORKING
     assert om.session_state(log, now=1e12) == om.WORKING
     write_lines(log, [TITLE, USER, assistant('stop')])
+    assert om.session_state(log, now=1e12, title='\u03c0 > X') == om.DONE
+    write_lines(log, [TITLE, USER, assistant('stop', text='Done.\n\nShould I also push it?')])
     assert om.session_state(log, now=1e12, title='\u03c0 > X') == om.NEEDS_INPUT
 
 
@@ -417,3 +420,86 @@ def test_cfg_write_waits_for_approval_without_title(tmp_path):
              'data': {'toolName': 'write', 'args': {'path': 'cfg://modelRoles'}}}
     write_lines(log, [TITLE, USER, assistant('toolUse', 'write'), start])
     assert om.session_state(log, now=1e12) == om.NEEDS_INPUT
+
+
+# --- finished vs waiting, stale jobs ----------------------------------------------
+
+def test_asks_user():
+    assert not om.asks_user('The ToDo for issue #49 is now marked "Done".')
+    assert not om.asks_user('Pushed.\n\n\u203b recap: Next, should I try it on the robot?')  # recap ignored
+    assert not om.asks_user('Run `git log --grep=fix?` to see it.')                          # code span
+    assert not om.asks_user('Should I merge?\n\nIt is merged now.\n\nAll tests pass.')        # 2 paras back
+    assert om.asks_user('All tests pass.\n\nShould I do the main merge now? It includes 3 conflicts.')
+    assert om.asks_user('Two options: A or B. Tell me which one you prefer.')
+    assert om.asks_user('If you want it reopened, let me know.')
+    assert not om.asks_user('')
+    assert not om.asks_user(None)
+
+
+def test_last_assistant_text_omp_and_claude(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [USER, assistant('stop', text='first'), assistant('toolUse', 'bash', text=''),
+                      RESULT])
+    assert om.last_assistant_text(log) == 'first'
+    claude = tmp_path / 'c.jsonl'
+    write_lines(claude, [{'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+        {'type': 'text', 'text': 'Want me to push?'}, {'type': 'tool_use', 'name': 'Bash'}]}}])
+    assert om.last_assistant_text(claude) == 'Want me to push?'
+
+
+def stamped(record, when):
+    record = dict(record)
+    record['timestamp'] = when.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+    return record
+
+
+def test_backgrounded_job_ends_at_its_deadline(tmp_path):
+    log = tmp_path / 's.jsonl'
+    start = NOW - timedelta(minutes=90)
+    write_lines(log, [stamped(job_result(
+        'bash', 'Backgrounded as job bg_4 (killed once it has run 3600s in total; `timeout: 0` '
+                'disables the deadline)'), start)])
+    assert om.pending_jobs(log, now=(start + timedelta(minutes=30)).timestamp()) == {'bg_4'}
+    assert om.pending_jobs(log, now=NOW.timestamp()) == set()     # 3600 s are over
+
+
+def test_job_reported_not_found_is_gone(tmp_path):
+    log = tmp_path / 's.jsonl'
+    write_lines(log, [job_result('bash', 'Backgrounded as job bg_4 (output follows)'),
+                      job_result('read', 'Background job or service not found: bg_4')])
+    assert om.pending_jobs(log) == set()
+
+
+def test_jobs_from_an_earlier_omp_process_are_gone(tmp_path):
+    log = tmp_path / 's.jsonl'
+    t_job = NOW - timedelta(hours=2)
+    write_lines(log, [stamped(job_result('task', 'Spawned agent `S` (job `S`).'), t_job)])
+    assert om.pending_jobs(log, now=NOW.timestamp(), since=(t_job - timedelta(minutes=1)).timestamp()) == {'S'}
+    assert om.pending_jobs(log, now=NOW.timestamp(), since=(t_job + timedelta(minutes=1)).timestamp()) == set()
+
+
+def test_finished_turn_after_stale_job_is_done(tmp_path):
+    log = tmp_path / 's.jsonl'
+    start = NOW - timedelta(minutes=90)
+    write_lines(log, [TITLE, USER, stamped(job_result(
+        'bash', 'Backgrounded as job bg_4 (killed once it has run 3600s in total)'), start),
+        assistant('stop', text='Marked Done. I can close the issue once it is tested.')])
+    assert om.session_state(log, now=NOW.timestamp(), title='\u03c0 > X') == om.DONE
+
+
+def test_claude_idle_with_question_needs_input(tmp_path):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    claude = tmp_path / 'claude'
+    (claude / 'sessions').mkdir(parents=True)
+    (claude / 'sessions' / '300.json').write_text(json.dumps({'pid': 300, 'sessionId': 'sid',
+                                                             'status': 'idle'}))
+    log = claude / 'projects' / '-home-u' / 'sid.jsonl'
+    make_proc(proc, 200, '/dev/pts/9', ['bash'])
+    make_proc(proc, 300, '/dev/pts/9', ['claude'])
+    write_lines(log, [{'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+        {'type': 'text', 'text': 'Pushed. Should I open a PR?'}]}}])
+    assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) == om.NEEDS_INPUT
+    write_lines(log, [{'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+        {'type': 'text', 'text': 'Pushed.'}]}}])
+    assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) == om.DONE

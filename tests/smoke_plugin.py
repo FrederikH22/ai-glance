@@ -225,8 +225,9 @@ panel._last_key = None
 panel.refresh()
 pump(8.0, lambda: 'Claude Code also works in' in label_texts(panel) and not panel._in_flight)
 check('8b: section for repos outside the pane folder', 'Claude Code also works in' in label_texts(panel))
-check(f'8b: the outside repo ({_own.name}) is listed with its branch',
-      _own.name in label_texts(panel))
+_own_name = gitinfo.repo_state(_own).name  # the repo's name, also when run from a worktree
+check(f'8b: the outside repo ({_own_name}) is listed with its branch',
+      _own_name in label_texts(panel))
 check('8b: agent badge names Claude Code', label_texts(panel).count('Claude Code') >= 1)
 shot('git-panel-external.png')
 gtk_git_panel.ompsessions.pane_agent_paths = real_fn
