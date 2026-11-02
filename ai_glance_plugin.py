@@ -39,3 +39,8 @@ class AiGlance(plugin.Plugin):
             gtk_omp_state.install()
         except Exception as exc:
             err('ai-glance: omp state colours install failed: %r' % (exc,))
+        try:
+            from ai_glance import gtk_window_title
+            gtk_window_title.install()
+        except Exception as exc:
+            err('ai-glance: window title install failed: %r' % (exc,))

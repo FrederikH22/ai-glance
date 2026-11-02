@@ -21,6 +21,9 @@ A Terminator 2.1.3 plugin for working with AI coding agents (omp) across git wor
   permission prompt open). omp's state comes from the run-state mark it writes into the
   terminal title (`π ⠋` / `π >` / `π !`, omp's `tui.titleState`, on by default) plus its
   session log for background jobs. Panes without an agent keep the stock header.
+- **Window title follows the focused pane only.** Stock Terminator lets every pane write
+  the window title, so several omp sessions animating a spinner in their titles make it
+  flicker between sessions.
 
 ## Screenshots
 
