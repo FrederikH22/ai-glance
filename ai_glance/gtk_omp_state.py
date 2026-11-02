@@ -107,7 +107,7 @@ def _restore_stock(titlebar):
 
 
 def set_state(titlebar, state):
-    """Apply ``state`` (WORKING, NEEDS_INPUT or None) to one titlebar (GTK thread)."""
+    """Apply ``state`` (WORKING, NEEDS_INPUT, DONE or None) to one titlebar (GTK thread)."""
     if state_of(titlebar) == state:
         return
     _hook(titlebar)

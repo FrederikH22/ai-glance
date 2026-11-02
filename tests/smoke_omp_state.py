@@ -103,8 +103,9 @@ def poll():
     pump(0.6)
 
 
-# Panes start in '/', so their titles stay short and never cover the sampled header pixel
-# (a long checkout path would, e.g. when run from a git worktree).
+# set_origcwd('/') makes the panes start in $HOME (Terminator ignores '/'), so their titles
+# stay short and never cover the sampled header pixel (a long checkout path would, e.g. when
+# run from a git worktree).
 os.chdir('/')
 terminator = Terminator()
 terminator.set_origcwd('/')
