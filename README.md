@@ -93,15 +93,22 @@ Not restored: scrollback and screen contents, and any other command. A pane that
   atomically every 10 s when something changed, so after a crash or `kill -9` at most
   10 s of changes are lost. A corrupt or unknown-version snapshot is left untouched and
   Terminator starts normally without saving.
-- **Opt out:** `AI_GLANCE_NO_RESTORE=1 terminator` starts empty and never writes the snapshot.
+- **Opt out:** `AI_GLANCE_NO_RESTORE=1 terminator` starts with one normal window and never
+  writes the snapshot.
 - **Second process:** only the first running Terminator (the one holding
   `session.lock`) restores and saves. A second `terminator -u` opens a normal window and
   does not touch the snapshot.
 - **Closing windows one by one:** a state without any window is never saved, so the last
   window you close stays in the snapshot and comes back on the next start (closing all
   windows at once restores them all).
-- **No restore** when Terminator is started with `-l`, `-e`, `-x`, `--working-directory`,
-  `-p`, `-H` or `-T` (or `--config`/`--configjson`); these ask for something specific.
+- **No restore** (and no saving) when Terminator is started with `-l` (except `-l default`,
+  which is a plain start), `-e`, `-x`, `--working-directory`, `-p`, `-H`, `-T`, `-g`/`--config`
+  or `-j`/`--config-json`; these ask for something specific, and the command or folder you
+  asked for is left alone. Such a process does not take the session lock either.
+- **Startup layout:** restore and saving need the normal startup of one window with one
+  pane. If your `default` layout has several panes, session restore is silently off.
+- **Zoomed panes:** while a pane is zoomed (or maximised within its window) no snapshot is
+  written, so the last complete one is kept.
 
 ## Risk: monkeypatching
 

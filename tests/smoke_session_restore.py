@@ -12,6 +12,9 @@ bootstrap like /usr/bin/terminator (default layout, then the plugin loads lazily
   G  restores, closes every window: the snapshot keeps its windows
   D  AI_GLANCE_NO_RESTORE=1: no restore, never saves
   E  corrupt snapshot: normal window, never saves, file untouched
+  X  `-x sleep 300` / W `--working-directory`: skipped (Terminator clears these options while
+     it starts the startup pane), the requested command / folder survives, no lock taken
+  Z  restores, zooms a pane: nothing is saved while zoomed; saving resumes after unzoom
 
 Agents are fake scripts (PATH is replaced); SHELL is a bash without rc files. Never touches
 the real ~/.config, ~/.local/state or a running Terminator.
@@ -39,7 +42,6 @@ for _p in (XDG_CONFIG, XDG_STATE):
         sys.exit('refusing to use the real config/state dir')
 
 SNAPSHOT = Path(XDG_STATE) / 'ai-glance' / 'session.json'
-ERR_PATTERN = re.compile(r'Gtk-(CRITICAL|WARNING)|GLib-.*(CRITICAL|WARNING)|Traceback|Error')
 OMP_SESSION = 'omp-session.jsonl'
 CLAUDE_SESSION = 'c1a0de00-0000-4000-8000-000000000001'
 
@@ -214,6 +216,11 @@ if ROLE is None:
     f = Role('F')
     f.finish()
     f.verdict()
+
+    for role in ('X', 'W', 'Z'):
+        r = Role(role)
+        r.finish()
+        r.verdict()
 
     half = SNAPSHOT.read_bytes() if SNAPSHOT.exists() else b'{"version": 1, "layout": {"win'
     SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
@@ -554,6 +561,91 @@ def role_options():
     finish()
 
 
+def role_startup_option(role):
+    """X / W: -x / --working-directory are a start the user asked for. Terminator clears these
+    options while it starts the startup pane, so the decision must not depend on them then."""
+    import terminatorlib.optionparse as optionparse
+    if role == 'X':
+        sys.argv = ['terminator', '-x', 'sleep', '300']
+    else:
+        sys.argv = ['terminator', '--working-directory', DIRS['proj_beta']]
+    optionparse.parse_options()
+    terminator = boot()
+    mod = restore_module()
+    from ai_glance import session_store
+    data, mtime = SNAPSHOT.read_bytes(), stat_ns()
+    check(f'{role}: state is skipped',
+          pump(20, lambda: mod.state() is not None) and mod.state() == 'skipped', mod.state())
+    check(f'{role}: the startup window stays alone',
+          len(terminator.windows) == 1 and len(terminator.terminals) == 1,
+          (len(terminator.windows), len(terminator.terminals)))
+    term = terminator.terminals[0]
+    check(f'{role}: the startup pane has a child', pump(8, lambda: bool(term.pid)))
+    if role == 'X':
+        def cmdline():
+            try:
+                return Path(f'/proc/{term.pid}/cmdline').read_bytes().split(b'\0')
+            except OSError:
+                return []
+        check('X: the pane still runs sleep 300', cmdline()[:2] == [b'sleep', b'300'], cmdline())
+    else:
+        check('W: the pane runs in the requested folder', pump(8, lambda: term.get_cwd() == DIRS['proj_beta']),
+              term.get_cwd())
+    check(f'{role}: saving is off', not mod.saving())
+    lock = session_store.SessionLock()
+    check(f'{role}: a skipped start does not take the session lock', lock.acquire())
+    lock.release()
+    pump(13.0)
+    check(f'{role}: snapshot bytes unchanged after 13 s', SNAPSHOT.read_bytes() == data and stat_ns() == mtime)
+    if role == 'X' and term.pid:
+        try:
+            os.kill(term.pid, signal.SIGTERM)
+        except OSError:
+            pass
+    finish()
+
+
+def role_zoom():
+    """Z: a zoomed pane detaches its window's other panes from the widget tree, so the layout
+    would list only that pane: no save while zoomed."""
+    terminator = Terminator()
+    terminator.set_origcwd(os.getcwd())
+    terminator.reconfigure()
+    terminator.create_layout('default')
+    terminator.layout_done()
+    mod = restore_module()
+    check('Z: restored', pump(20, lambda: mod.state() is not None) and mod.state() == 'restored', mod.state())
+    pump(3.0)
+    win = max(terminator.windows, key=lambda w: len([t for t in terminator.terminals
+                                                     if t.get_toplevel() is w]))
+    panes = [t for t in terminator.terminals if t.get_toplevel() is win]
+    check('Z: a window with several panes', len(panes) >= 2, len(panes))
+    check('Z: all panes have a shell', pump(8, lambda: all(t.pid for t in terminator.terminals)))
+    pump(12.0)  # settle: let a save capture the restored state
+    before = SNAPSHOT.read_bytes()
+    win.zoom(panes[0])
+    pump(0.5)
+    check('Z: the window is zoomed', win.is_zoomed())
+    pump(13.0)  # longer than the save interval
+    check('Z: nothing saved while zoomed', SNAPSHOT.read_bytes() == before)
+    check('Z: the snapshot still has every pane',
+          sum(1 for i in json.loads(before)['layout'].values() if i.get('type') == 'Terminal') == 5)
+    win.unzoom()
+    pump(0.5)
+    check('Z: the window is unzoomed', not win.is_zoomed())
+    check('Z: a change after unzoom is cd', cd(panes[0], DIRS['proj_delta']), panes[0].get_cwd())
+
+    def saved_again():
+        snap = snapshot_json()
+        if snap is None:
+            return False
+        terms = [i for i in snap['layout'].values() if i.get('type') == 'Terminal']
+        return len(terms) == 5 and any(i.get('directory') == DIRS['proj_delta']
+                                       and i.get('uuid') == str(panes[0].uuid) for i in terms)
+    check('Z: saving resumes after unzoom', pump(25, saved_again))
+    finish()
+
+
 def role_create_layout_fails():
     """create_layout raising after it built windows: startup window must keep working."""
     terminator = Terminator()
@@ -610,6 +702,10 @@ def run_role():
         role_options()
     elif ROLE == 'F':
         role_create_layout_fails()
+    elif ROLE in ('X', 'W'):
+        role_startup_option(ROLE)
+    elif ROLE == 'Z':
+        role_zoom()
     else:
         sys.exit(f'unknown role {ROLE}')
 

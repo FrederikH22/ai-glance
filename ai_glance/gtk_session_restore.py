@@ -2,13 +2,15 @@
 snapshot of the current ones on disk while Terminator runs.
 
 Startup (a ``GLib.idle_add`` scheduled at plugin load, i.e. after Terminator's own
-``create_layout('default')``): a worker thread takes the session lock and reads the
-snapshot; the main thread then rebuilds the layout with ``Terminator.create_layout`` from
+``create_layout('default')``): whether this is a plain start is decided at plugin load,
+before the startup pane clears -e/-x/--working-directory; a worker thread then takes the
+session lock (plain starts only) and reads the snapshot; the main thread then rebuilds the layout with ``Terminator.create_layout`` from
 a private in-memory layout and closes the untouched startup window.
 
 Saving (only after that decision, only in the lock holder): every ``SAVE_SECONDS`` the
-main thread reads the layout and the pane pids, a worker thread detects the agents and
-writes the snapshot atomically. Nothing but widget state is read on the main thread.
+main thread reads the layout, the pane pids and folder URIs, a worker thread resolves the
+folders, detects the agents and writes the snapshot atomically. A save is skipped while a
+pane is zoomed (the layout would list only that pane).
 """
 import json
 import os
@@ -33,6 +35,7 @@ _lock = session_store.SessionLock()
 _restored_agents = {}    # uuid -> agent record that was restored
 _restored_at = 0.0
 _in_flight = False
+_plain = False           # decided in install(), before any child is started
 _last_bytes = None
 
 
@@ -49,10 +52,11 @@ def saving():
 
 def install():
     """Schedule the startup decision once per process (idempotent)."""
-    global _installed
+    global _installed, _plain
     if _installed:
         return
     _installed = True
+    _plain = _plain_start()
     from gi.repository import GLib
     GLib.idle_add(_startup)
 
@@ -65,7 +69,8 @@ def _decide(value):
 
 
 def _plain_start():
-    """No option asked for something specific, and AI_GLANCE_NO_RESTORE is unset."""
+    """No option asked for something specific, and AI_GLANCE_NO_RESTORE is unset. Must run
+    before the first pane starts: it clears -e/-x/--working-directory when it spawns."""
     if os.environ.get('AI_GLANCE_NO_RESTORE'):
         return False
     from terminatorlib import optionparse
@@ -95,7 +100,9 @@ def _prepare():
     from gi.repository import GLib
     result = (_FAILED, None)
     try:
-        if not _lock.acquire():
+        if not _plain:
+            result = (_SKIPPED, None)
+        elif not _lock.acquire():
             result = (_NOT_OWNER, None)
         else:
             path = session_store.snapshot_path()
@@ -128,11 +135,11 @@ def _apply(outcome, payload):
 
 def _apply_inner(outcome, payload):
     from terminatorlib.terminator import Terminator
-    if outcome in (_NOT_OWNER, _FAILED):
+    if outcome in (_NOT_OWNER, _FAILED, _SKIPPED):
         _decide(outcome)
         return
     terminator = Terminator()
-    if not _plain_start() or len(terminator.windows) != 1 or len(terminator.terminals) != 1:
+    if len(terminator.windows) != 1 or len(terminator.terminals) != 1:
         _decide(_SKIPPED)
         return
     if outcome == _NO_SNAPSHOT:
@@ -188,8 +195,12 @@ def _tick():
     try:
         from terminatorlib.terminator import Terminator
         terminator = Terminator()
-        layout = terminator.describe_layout(save_cwd=True)
-        panes = [(str(t.uuid), t.pid) for t in terminator.terminals]
+        if any(w.is_zoomed() for w in terminator.windows):
+            dbg('ai-glance session restore: save skipped, a pane is zoomed')
+            return True
+        layout = terminator.describe_layout(save_cwd=False)
+        panes = [(str(t.uuid), t.pid, t.vte.get_current_directory_uri())
+                 for t in terminator.terminals]
         _in_flight = True
         threading.Thread(target=_save, args=(layout, panes), daemon=True,
                          name='ai-glance-save').start()
@@ -199,23 +210,45 @@ def _tick():
     return True
 
 
+def _folder(uri, pid):
+    """Folder of a pane from its OSC 7 URI, else /proc/<pid>/cwd; None when neither works."""
+    if uri:
+        try:
+            from gi.repository import GLib
+            return GLib.filename_from_uri(uri)[0]
+        except Exception:  # noqa: BLE001
+            pass
+    if pid:
+        try:
+            return os.readlink(f'/proc/{pid}/cwd')
+        except OSError:
+            pass
+    return None
+
+
 def _save(layout, panes):
-    """Worker thread: agent detection, then the atomic write."""
+    """Worker thread: folders, agent detection, then the atomic write."""
     global _in_flight, _last_bytes
     try:
         layout = json.loads(json.dumps(layout, default=str))  # UUID objects -> str
         detected = {}
-        for uuid, pid in panes:
+        folders = {}
+        for uuid, pid, uri in panes:
+            folder = _folder(uri, pid)
+            if folder:
+                folders[uuid] = folder
             record = session_store.agent_record(pid)
             if record is not None:
                 detected[uuid] = record
         agents = session_store.merge_agents(detected, _restored_agents, _restored_at,
-                                            time.monotonic(), {u for u, _ in panes})
+                                            time.monotonic(), {u for u, _, _ in panes})
         for item in layout.values():
             if isinstance(item, dict) and item.get('type') == 'Terminal':
                 record = agents.get(item.get('uuid'))
                 if record is not None:
                     item['directory'] = record['cwd']
+                elif item.get('uuid') in folders:
+                    item['directory'] = folders[item.get('uuid')]
         written = session_store.write_snapshot(session_store.snapshot_path(), layout, agents,
                                                _last_bytes)
         if written is not None:
