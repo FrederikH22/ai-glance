@@ -88,11 +88,26 @@ def agent_record(shell_pid: Optional[int], proc: Path = Path('/proc'),
 
 
 def clean_layout(layout: dict) -> dict:
-    """Deep copy without window ``title`` keys (create_layout would freeze them as force_title)."""
+    """Deep copy that create_layout can rebuild from:
+
+    - no window ``title`` (create_layout would freeze it as force_title);
+    - a window's ``last_active_term`` only if it names a Terminal of the layout (a stale one
+      makes Terminator raise while focusing it);
+    - ``maximised`` / ``fullscreen`` / ``last_active_window`` as 'True'/'False' strings
+      (describe_layout stores booleans, Terminator compares with the string 'True')."""
     out = copy.deepcopy(layout)
+    uuids = {str(item.get('uuid')) for item in out.values()
+             if isinstance(item, dict) and item.get('type') == 'Terminal'}
     for item in out.values():
-        if isinstance(item, dict) and item.get('type') == 'Window':
-            item.pop('title', None)
+        if not isinstance(item, dict) or item.get('type') != 'Window':
+            continue
+        item.pop('title', None)
+        if 'last_active_term' in item and str(item['last_active_term']) not in uuids:
+            del item['last_active_term']
+        for key in ('maximised', 'fullscreen', 'last_active_window'):
+            if key in item:
+                value = item[key]
+                item[key] = 'True' if value is True or str(value) == 'True' else 'False'
     return out
 
 

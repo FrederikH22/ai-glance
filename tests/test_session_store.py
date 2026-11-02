@@ -43,6 +43,29 @@ def test_clean_layout_drops_window_title_only():
     assert LAYOUT['terminal1']['directory'] == '/w/a'
 
 
+def test_clean_layout_drops_stale_last_active_term_keeps_valid_one():
+    layout = {'window0': {'type': 'Window', 'parent': '', 'last_active_term': 'gone'},
+              'window1': {'type': 'Window', 'parent': '', 'last_active_term': 'u1'},
+              'window2': {'type': 'Window', 'parent': ''},
+              'terminal1': dict(LAYOUT['terminal1'], parent='window1')}
+    out = ss.clean_layout(layout)
+    assert 'last_active_term' not in out['window0']
+    assert out['window1']['last_active_term'] == 'u1'
+    assert 'last_active_term' not in out['window2']
+    assert layout['window0']['last_active_term'] == 'gone'
+
+
+def test_clean_layout_window_flags_become_terminator_strings():
+    layout = {'w0': {'type': 'Window', 'parent': '', 'maximised': True, 'fullscreen': False,
+                     'last_active_window': True},
+              'w1': {'type': 'Window', 'parent': '', 'maximised': 'True', 'fullscreen': 'False'}}
+    out = ss.clean_layout(layout)
+    assert (out['w0']['maximised'], out['w0']['fullscreen'], out['w0']['last_active_window']) == \
+        ('True', 'False', 'True')
+    assert (out['w1']['maximised'], out['w1']['fullscreen']) == ('True', 'False')
+    assert 'last_active_window' not in out['w1']
+
+
 def test_window_count():
     assert ss.window_count(LAYOUT) == 1
     assert ss.window_count({}) == 0
