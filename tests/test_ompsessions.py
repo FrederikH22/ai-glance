@@ -574,3 +574,27 @@ def test_claude_idle_with_question_needs_input(tmp_path):
     write_lines(log, [{'type': 'assistant', 'message': {'role': 'assistant', 'content': [
         {'type': 'text', 'text': 'Pushed.'}]}}])
     assert om.pane_agent_state(200, proc, tmp_path / 'none', claude_dir=claude) == om.DONE
+
+
+def test_claude_tool_results_do_not_end_the_backward_scan(tmp_path):
+    log = tmp_path / 'c.jsonl'
+    write_lines(log, [
+        {'type': 'user', 'message': {'role': 'user', 'content': 'fix it'}},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'text', 'text': 'Done. Should I push it?'}]}},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'name': 'Bash', 'input': {'command': 'git status'}}]}},
+        {'type': 'user', 'message': {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'x', 'content': 'clean'}]}},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'name': 'Bash', 'input': {'command': 'true'}}]}},
+    ])
+    assert om.asks_user(om.last_turn_end(log)[0])
+    write_lines(log, [
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'text', 'text': 'Should I push it?'}]}},
+        {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'text', 'text': 'no'}]}},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'name': 'Bash', 'input': {'command': 'true'}}]}},
+    ])
+    assert not om.asks_user(om.last_turn_end(log)[0])   # the user answered it

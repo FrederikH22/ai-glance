@@ -515,6 +515,14 @@ def asks_user(text: Optional[str]) -> bool:
     return bool(_QUESTION_END.search(tail) or _ASK_PHRASES.search(tail))
 
 
+def _is_tool_result(msg: dict) -> bool:
+    """Claude Code logs tool results as ``role: user`` records; only those count as
+    tool output, every other user record is the user speaking."""
+    content = msg.get('content')
+    return isinstance(content, list) and bool(content) and all(
+        isinstance(c, dict) and c.get('type') == 'tool_result' for c in content)
+
+
 def last_turn_end(log: Path, tail_bytes: int = 256 * 1024) -> tuple:
     """(text, errored) of the log's last turn: the newest assistant message with text, looking
     back no further than the newest user message, and whether the newest assistant message
@@ -537,8 +545,8 @@ def last_turn_end(log: Path, tail_bytes: int = 256 * 1024) -> tuple:
         msg = obj.get('message') if isinstance(obj, dict) else None
         if not isinstance(msg, dict):
             continue
-        if msg.get('role') == 'user':
-            break
+        if msg.get('role') == 'user' and not _is_tool_result(msg):
+            break  # the user spoke after this; earlier questions are answered
         if msg.get('role') != 'assistant':
             continue
         if errored is None:
