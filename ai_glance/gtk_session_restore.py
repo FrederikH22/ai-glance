@@ -74,7 +74,8 @@ def _plain_start():
         return True
     if getattr(opts, 'layout', None) not in (None, '', 'default'):
         return False
-    for name in ('execute', 'command', 'working_directory', 'profile', 'config', 'configjson'):
+    for name in ('execute', 'command', 'working_directory', 'profile', 'config', 'configjson',
+                 'hidden', 'forcedtitle'):
         if getattr(opts, name, None):
             return False
     return True
@@ -155,6 +156,10 @@ def _restore(terminator, layout, restored):
         dbg(f'ai-glance session restore: create_layout failed: {exc!r}')
         for window in [w for w in terminator.windows if w not in startup]:
             window.emit('destroy')
+        # create_layout sets these and only layout_done clears them; without the reset the
+        # startup window could not spawn shells (spawn_child returns while doing_layout).
+        terminator.doing_layout = False
+        terminator.prelayout_windows = None
         _decide(_FAILED)
         return
     finally:

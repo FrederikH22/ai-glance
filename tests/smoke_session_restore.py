@@ -124,7 +124,10 @@ if ROLE is None:
 
     conf = Path(XDG_CONFIG) / 'terminator'
     conf.mkdir(parents=True, exist_ok=True)
-    (conf / 'config').write_text('[profiles]\n  [[default]]\n  [[alt]]\n    background_color = "#102030"\n')
+    layout_x = ('    [[[window0]]]\n      type = Window\n      parent = ""\n'
+                '    [[[child1]]]\n      type = Terminal\n      parent = window0\n')
+    (conf / 'config').write_text('[profiles]\n  [[default]]\n  [[alt]]\n    background_color = "#102030"\n'
+                                 '[layouts]\n  [[default]]\n' + layout_x + '  [[x]]\n' + layout_x)
     subprocess.run(['bash', str(ROOT / 'install.sh')], check=True, stdout=subprocess.DEVNULL)
 
     env = dict(os.environ, AI_GLANCE_SMOKE_TMP=str(work), SHELL=str(shell), HISTFILE='/dev/null',
@@ -203,6 +206,14 @@ if ROLE is None:
     d = Role('D', {'AI_GLANCE_NO_RESTORE': '1'})
     d.finish()
     d.verdict()
+
+    o = Role('O')
+    o.finish()
+    o.verdict()
+
+    f = Role('F')
+    f.finish()
+    f.verdict()
 
     half = SNAPSHOT.read_bytes() if SNAPSHOT.exists() else b'{"version": 1, "layout": {"win'
     SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
@@ -286,10 +297,23 @@ def stat_ns():
         return None
 
 
+STDERR_ALLOWED = [re.compile(r'Unable to open .*xdg/terminator/config')]
+if ROLE == 'C':  # B (still running) owns the global hide_window key binding
+    STDERR_ALLOWED += [re.compile(r"WARNING \*\*: .*Binding '.*' failed!"),
+                       re.compile(r'Unable to bind hide_window key')]
+if ROLE == 'F':  # Terminator's own deferred size-allocate on a pane of a window we destroyed
+    STDERR_ALLOWED += [re.compile(r'^Traceback \(most recent call last\):$'),
+                       re.compile(r'^  File ".*/terminatorlib/terminal\.py", line \d+, in '
+                                  r'(do_deferred_on_vte_size_allocate|on_vte_size_allocate)$'),
+                       re.compile(r'^\s+\S'),
+                       re.compile(r"^AttributeError: 'NoneType' object has no attribute 'get_column_count'$")]
+
+
 def stderr_ok():
     _errfile.seek(0)
     text = _errfile.read().decode(errors='replace')
-    bad = [l for l in text.splitlines() if ERR_PATTERN.search(l) and 'xdg/terminator/config' not in l]
+    bad = [l for l in text.splitlines()
+           if l.strip() and not any(p.search(l) for p in STDERR_ALLOWED)]
     check('stderr pristine', not bad, '\n'.join(bad[:10]))
 
 
@@ -405,6 +429,7 @@ def role_b(close_all=False):
     terminator.reconfigure()
     terminator.create_layout('default')
     terminator.layout_done()
+    layoutname_before = terminator.layoutname
     startup_window = terminator.windows[0]
     startup_term = terminator.terminals[0]
     mod = restore_module()
@@ -412,6 +437,10 @@ def role_b(close_all=False):
     check('restore decision made', pump(20, lambda: mod.state() is not None), mod.state())
     check(f'state is restored ({mod.state()})', mod.state() == 'restored')
     check('saving enabled after the restore', mod.saving())
+    from terminatorlib.config import Config
+    check('private layout removed from the in-memory config',
+          mod.LAYOUT_NAME not in Config().base.layouts)
+    check('layoutname restored', terminator.layoutname == layoutname_before, terminator.layoutname)
     expected = json.loads((WORK / 'expected.json').read_text())
     ids = json.loads((WORK / 'expected-uuids.json').read_text())
     check('the startup window is gone', startup_window not in terminator.windows
@@ -499,6 +528,71 @@ def role_idle(expected_state, name):
     finish()
 
 
+def role_options():
+    """Acceptance 6: `terminator -l <layout>` (and -T/-H/...) is a start the user asked for."""
+    import terminatorlib.optionparse as optionparse
+    sys.argv = ['terminator', '-l', 'x']
+    optionparse.parse_options()
+    terminator = boot()
+    mod = restore_module()
+    data, mtime = SNAPSHOT.read_bytes(), stat_ns()
+    check('O: -l x -> state skipped',
+          pump(20, lambda: mod.state() is not None) and mod.state() == 'skipped', mod.state())
+    check('O: the layout window stays alone', len(terminator.windows) == 1 and len(terminator.terminals) == 1)
+    check('O: saving is off', not mod.saving())
+    for argv, plain in ((['terminator'], True), (['terminator', '-l', 'default'], True),
+                        (['terminator', '-l', 'x'], False), (['terminator', '-T', 'fixed'], False),
+                        (['terminator', '-H'], False), (['terminator', '-e', 'true'], False),
+                        (['terminator', '-x', 'true'], False), (['terminator', '-p', 'alt'], False),
+                        (['terminator', '--working-directory', '/'], False)):
+        sys.argv = argv
+        optionparse.parse_options()
+        check(f'O: {" ".join(argv[1:]) or "no options"} is {"a plain" if plain else "not a plain"} start',
+              mod._plain_start() is plain)
+    pump(13.0)
+    check('O: snapshot bytes unchanged after 13 s', SNAPSHOT.read_bytes() == data and stat_ns() == mtime)
+    finish()
+
+
+def role_create_layout_fails():
+    """create_layout raising after it built windows: startup window must keep working."""
+    terminator = Terminator()
+    terminator.set_origcwd(os.getcwd())
+    terminator.reconfigure()
+    terminator.create_layout('default')
+    terminator.layout_done()
+    startup_window = terminator.windows[0]
+    startup_term = terminator.terminals[0]
+    mod = restore_module()
+    data, mtime = SNAPSHOT.read_bytes(), stat_ns()
+    real = Terminator.create_layout
+
+    def failing(self, name):
+        real(self, name)  # builds the windows, sets doing_layout / prelayout_windows
+        raise ValueError('simulated failure after the windows were built')
+    Terminator.create_layout = failing
+    check('F: decision made', pump(20, lambda: mod.state() is not None), mod.state())
+    Terminator.create_layout = real
+    check('F: state is failed', mod.state() == 'failed', mod.state())
+    check('F: the startup window is the only window',
+          terminator.windows == [startup_window] and terminator.terminals == [startup_term],
+          (len(terminator.windows), len(terminator.terminals)))
+    check('F: doing_layout is False', terminator.doing_layout is False)
+    check('F: prelayout_windows cleared', terminator.prelayout_windows is None)
+    startup_term.emit('split-vert', None)
+    pump(1.0)
+    new = [t for t in terminator.terminals if t is not startup_term]
+    check('F: a split in the startup window gets a shell', len(new) == 1 and pump(8, lambda: bool(new[0].pid)))
+    startup_term.emit('tab-new', False, startup_term)
+    pump(1.0)
+    tabbed = [t for t in terminator.terminals if t is not startup_term and t not in new]
+    check('F: a tab in the startup window gets a shell', len(tabbed) == 1 and pump(8, lambda: bool(tabbed[0].pid)))
+    check('F: saving is off', not mod.saving())
+    pump(13.0)
+    check('F: snapshot bytes unchanged after 13 s', SNAPSHOT.read_bytes() == data and stat_ns() == mtime)
+    finish()
+
+
 def run_role():
     if ROLE == 'A':
         role_a()
@@ -512,6 +606,10 @@ def run_role():
         role_idle('skipped', 'D')
     elif ROLE == 'E':
         role_idle('failed', 'E')
+    elif ROLE == 'O':
+        role_options()
+    elif ROLE == 'F':
+        role_create_layout_fails()
     else:
         sys.exit(f'unknown role {ROLE}')
 
