@@ -78,6 +78,31 @@ that has nothing to change touches neither the config nor the backup.
 until then. Terminator's title bars must be on (the
 `show_titlebar` option, on by default), otherwise there is no place for the git button.
 
+## Session restore
+
+On a plain start Terminator reopens what was open when it last ran: windows (size and
+position), tabs, splits with their ratios, profiles and each pane's folder. A pane that
+ran **omp** or **Claude Code** comes back running `omp --resume <session file>` or
+`claude --resume <session id>` in the same folder; the agent waits at its prompt (nothing
+is sent to it), and exiting it leaves a shell in that folder.
+
+Not restored: scrollback and screen contents, and any other command. A pane that ran
+`ssh ...`, `vim` or a build comes back as a plain shell in its folder; nothing is re-run.
+
+- **Snapshot:** `${XDG_STATE_HOME:-~/.local/state}/ai-glance/session.json`, rewritten
+  atomically every 10 s when something changed, so after a crash or `kill -9` at most
+  10 s of changes are lost. A corrupt or unknown-version snapshot is left untouched and
+  Terminator starts normally without saving.
+- **Opt out:** `AI_GLANCE_NO_RESTORE=1 terminator` starts empty and never writes the snapshot.
+- **Second process:** only the first running Terminator (the one holding
+  `session.lock`) restores and saves. A second `terminator -u` opens a normal window and
+  does not touch the snapshot.
+- **Closing windows one by one:** a state without any window is never saved, so the last
+  window you close stays in the snapshot and comes back on the next start (closing all
+  windows at once restores them all).
+- **No restore** when Terminator is started with `-l`, `-e`, `-x`, `--working-directory`,
+  `-p`, `-H` or `-T` (or `--config`/`--configjson`); these ask for something specific.
+
 ## Risk: monkeypatching
 
 Terminator has no plugin API for title-bar widgets or window chrome, so the plugin patches
@@ -108,7 +133,7 @@ worktrees) and run under Xvfb with an isolated config:
 
     export AI_GLANCE_SMOKE_WS=~/ros_ws                       # workspace root
     export AI_GLANCE_SMOKE_REPO=~/ros_ws/src/robot_driver    # a repo inside it
-    for s in tests/smoke_*.py; do XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a python3 "$s"; done
+    for s in tests/smoke_*.py; do XDG_CONFIG_HOME=$(mktemp -d) XDG_STATE_HOME=$(mktemp -d) xvfb-run -a python3 "$s"; done
 
 `AI_GLANCE_SMOKE_WORKTREE_WS` optionally points at a worktree workspace
 (default `$AI_GLANCE_SMOKE_WS/.worktrees/v2-ws`; skipped if absent).
